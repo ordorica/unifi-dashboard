@@ -1,5 +1,6 @@
 """Thin async wrapper around the UniFi controller connection, reusable by
 both the one-shot cron poller and the live server's persistent session."""
+import os
 import json
 import time
 from pathlib import Path
@@ -19,17 +20,38 @@ from aiounifi.models.api import ApiRequest, ApiRequestV2
 SETTINGS_FILE = Path(__file__).resolve().parent.parent.parent / ".claude" / "settings.local.json"
 
 
+def _settings_env() -> dict:
+    """The `env` block of settings.local.json, or {} when it is absent.
+
+    That file lives outside this directory and only exists on the development
+    Mac. In a container every value arrives through the real environment, so a
+    missing file is normal rather than an error.
+    """
+    try:
+        return json.loads(SETTINGS_FILE.read_text()).get("env", {})
+    except (OSError, ValueError):
+        return {}
+
+
 def load_config() -> dict:
-    data = json.loads(SETTINGS_FILE.read_text())
-    env = data.get("env", {})
+    settings = _settings_env()
+
+    def pick(*names, default=None):
+        """Real environment first, then settings.local.json, then default."""
+        for source in (os.environ, settings):
+            for name in names:
+                if source.get(name):
+                    return source[name]
+        return default
+
     return {
-        "host": env.get("UNIFI_NETWORK_HOST") or env.get("UNIFI_HOST"),
-        "username": env.get("UNIFI_NETWORK_USERNAME") or env.get("UNIFI_USERNAME"),
-        "password": env.get("UNIFI_NETWORK_PASSWORD") or env.get("UNIFI_PASSWORD"),
-        "port": int(env.get("UNIFI_NETWORK_PORT") or env.get("UNIFI_PORT") or 443),
-        "site": env.get("UNIFI_NETWORK_SITE") or env.get("UNIFI_SITE") or "default",
-        "verify_ssl": str(env.get("UNIFI_NETWORK_VERIFY_SSL") or env.get("UNIFI_VERIFY_SSL") or "false").lower()
-        == "true",
+        "host": pick("UNIFI_NETWORK_HOST", "UNIFI_HOST"),
+        "username": pick("UNIFI_NETWORK_USERNAME", "UNIFI_USERNAME"),
+        "password": pick("UNIFI_NETWORK_PASSWORD", "UNIFI_PASSWORD"),
+        "port": int(pick("UNIFI_NETWORK_PORT", "UNIFI_PORT", default=443)),
+        "site": pick("UNIFI_NETWORK_SITE", "UNIFI_SITE", default="default"),
+        "verify_ssl": str(pick("UNIFI_NETWORK_VERIFY_SSL", "UNIFI_VERIFY_SSL",
+                               default="false")).lower() == "true",
     }
 
 

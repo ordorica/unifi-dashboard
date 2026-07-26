@@ -20,6 +20,7 @@ Run via: uv run --with unifi-core --with aiounifi python3 live_server.py
 import asyncio
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -34,7 +35,11 @@ from unifi_lib.fetch import UnifiSession
 
 HERE = Path(__file__).resolve().parent
 STATIC_DIR = HERE / "static"
-HOST, PORT = "127.0.0.1", 8787
+# Loopback default preserves the macOS/launchd behaviour; the container
+# overrides BIND_HOST to 0.0.0.0, since 127.0.0.1 inside a container is
+# unreachable from the host.
+HOST = os.environ.get("BIND_HOST", "127.0.0.1")
+PORT = int(os.environ.get("BIND_PORT", "8787"))
 
 FAST_INTERVAL = 1
 PERSIST_INTERVAL = 60

@@ -1,11 +1,15 @@
 """SQLite schema and persistence helpers shared by the cron poller and the
 live server. One writer at a time is assumed per process; WAL mode lets the
 live server's REST API read concurrently with its own background writer."""
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-DB_FILE = Path(__file__).resolve().parent.parent / "unifi_clients.db"
+# Container deployments point this at a mounted volume so the database
+# survives image rebuilds. Default keeps the file beside the code, as before.
+DB_FILE = Path(os.environ.get("UNIFI_DB_PATH")
+               or Path(__file__).resolve().parent.parent / "unifi_clients.db")
 RETENTION_DAYS = 30
 
 
