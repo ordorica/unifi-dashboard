@@ -1,0 +1,29 @@
+services:
+  unifi-dashboard:
+    image: ${IMAGE:-unifi-dashboard:local}
+    build: .
+    container_name: unifi-dashboard
+    restart: unless-stopped
+    ports:
+      # HOST_PORT is what you browse to; BIND_PORT is what the server listens
+      # on inside the container. Normally only HOST_PORT changes.
+      - "${HOST_PORT:-8787}:${BIND_PORT:-8787}"
+    environment:
+      BIND_HOST: 0.0.0.0
+      BIND_PORT: ${BIND_PORT:-8787}
+      UNIFI_DB_PATH: /data/unifi_clients.db
+      UNIFI_NETWORK_HOST: ${UNIFI_NETWORK_HOST}
+      UNIFI_NETWORK_USERNAME: ${UNIFI_NETWORK_USERNAME}
+      UNIFI_NETWORK_PASSWORD: ${UNIFI_NETWORK_PASSWORD}
+      UNIFI_NETWORK_PORT: ${UNIFI_NETWORK_PORT:-443}
+      UNIFI_NETWORK_SITE: ${UNIFI_NETWORK_SITE:-default}
+      UNIFI_NETWORK_VERIFY_SSL: ${UNIFI_NETWORK_VERIFY_SSL:-false}
+    volumes:
+      # Must be a directory, not a file: WAL mode creates -wal and -shm
+      # sidecars beside the database. Must be local storage, never NFS/SMB.
+      - ${DATA_DIR:-./data}:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
