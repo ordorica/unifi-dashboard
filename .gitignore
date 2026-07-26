@@ -19,4 +19,7 @@ data/
 __pycache__/
 *.py[cod]
 
+# Subagent-driven-development scratch: ledger, briefs, review packages.
+.superpowers/
+
 .DS_Store
