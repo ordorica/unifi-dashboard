@@ -552,9 +552,17 @@ sqlite3 data/unifi_clients.db "select name from sqlite_master where type='table'
 sqlite3 data/unifi_clients.db "select count(*) from clients;"
 ```
 
-Expected: `unifi_clients.db` **plus `unifi_clients.db-wal` and `-shm`** on the
-host; tables present; a non-zero client count. If the `-wal` file is missing,
-the mount is wrong.
+Expected: `unifi_clients.db` on the host, containing tables, with a non-zero
+client count. **That is the signal the mount works** — the file is being
+created and written on the host side rather than inside the container.
+
+**Do NOT expect `-wal` and `-shm` to be present.** SQLite deletes both on last
+connection close, and this codebase opens a connection per cycle
+(`db.connect()` … `conn.close()`) rather than holding one open. Verified: the
+production database — 222MB, running for days, `pragma journal_mode` = `wal` —
+has no sidecars at rest either. They appear only *during* an open transaction.
+Their absence says nothing about the mount; treating it as a failure signal
+would reject a perfectly healthy deployment.
 
 **Ownership on macOS will not read as 1000, and that is correct here.** Docker
 Desktop's VirtioFS remaps bind-mount ownership to whichever user the container
