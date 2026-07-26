@@ -1,0 +1,3319 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>UniFi Monitor — Live</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --page:           #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --grid:           #e1e0d9;
+    --baseline:       #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --good:           #0ca30c;
+    --warning:        #fab219;
+    --serious:        #ec835a;
+    --critical:       #d03b3b;
+    --slot-1: #2a78d6; --slot-2: #eb6834; --slot-3: #1baf7a; --slot-4: #eda100;
+    --slot-5: #e87ba4; --slot-6: #008300; --slot-7: #4a3aa7; --slot-8: #e34948;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --surface-1: #1a1a19; --page: #0d0d0d; --text-primary: #ffffff; --text-secondary: #c3c2b7;
+      --text-muted: #898781; --grid: #2c2c2a; --baseline: #383835; --border: rgba(255,255,255,0.10);
+      --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #e66767;
+      --slot-1: #3987e5; --slot-2: #d95926; --slot-3: #199e70; --slot-4: #c98500;
+      --slot-5: #d55181; --slot-6: #008300; --slot-7: #9085e9; --slot-8: #e66767;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--text-primary); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 24px 20px 60px; }
+
+  .app-header { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 4px; }
+  h1 { font-size: 20px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+  .subtitle { color: var(--text-secondary); font-size: 12.5px; margin: 0 0 18px; display: flex; align-items: center; gap: 8px; }
+  .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); flex: none; }
+  .live-dot.connected { background: var(--good); box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 25%, transparent); }
+  .live-dot.reconnecting { background: var(--warning); }
+
+  .top-nav, .seg { display: inline-flex; gap: 2px; background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 3px; }
+  /* Wraps rather than overflowing: the tab count has grown past what fits on
+     one line at narrower widths, and clipped//two-line tabs looked broken. */
+  .top-nav { margin-bottom: 20px; flex-wrap: wrap; max-width: 100%; }
+  .nav-btn, .seg-btn2 {
+    font-family: inherit; font-size: 13.5px; font-weight: 600; padding: 9px 18px; border: none; border-radius: 7px;
+    background: transparent; color: var(--text-secondary); cursor: pointer; display: inline-flex; align-items: center; gap: 7px;
+    white-space: nowrap;
+  }
+  @media (max-width: 900px) { .nav-btn { padding: 9px 13px; font-size: 13px; } }
+  .seg-btn2 { font-size: 12.5px; padding: 7px 14px; }
+  .nav-btn svg, .seg-btn2 svg { opacity: 0.65; flex: none; }
+  .nav-btn.active, .seg-btn2.active { background: color-mix(in srgb, var(--text-primary) 8%, transparent); color: var(--text-primary); }
+  .nav-btn.active svg, .seg-btn2.active svg { opacity: 1; }
+
+  .page { display: none; } .page.active { display: block; }
+
+  .section {
+    margin: 28px 0 0;
+  }
+  .section:first-child { margin-top: 0; }
+  h2.section-title {
+    font-size: 14px; font-weight: 650; margin: 0 0 12px; display: flex; align-items: center; gap: 8px;
+    cursor: pointer; user-select: none; padding: 4px 0;
+  }
+  h2.section-title .chevron {
+    display: inline-flex; transition: transform .15s ease; color: var(--text-muted); flex: none;
+  }
+  .section.collapsed h2.section-title .chevron { transform: rotate(-90deg); }
+  .section.collapsed .section-body { display: none; }
+  .count-pill { font-size: 11px; font-weight: 600; color: var(--text-muted); background: var(--surface-1); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; }
+
+  .drag-handle {
+    cursor: grab; color: var(--text-muted); opacity: 0.45; flex: none;
+    display: inline-flex; align-items: center; padding: 2px 4px; margin: -2px -4px -2px auto;
+    border-radius: 4px; transition: opacity .12s ease, background .12s ease;
+  }
+  .drag-handle:hover { opacity: 1; background: color-mix(in srgb, var(--text-primary) 6%, transparent); }
+  .drag-handle:active { cursor: grabbing; }
+  section.section.dragging { opacity: 0.35; }
+  section.section.drag-over-top { box-shadow: inset 0 2px 0 0 var(--text-primary); }
+  section.section.drag-over-bottom { box-shadow: inset 0 -2px 0 0 var(--text-primary); }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 8px; }
+  .tile {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px;
+    cursor: pointer; transition: border-color .12s ease;
+  }
+  .tile:hover { border-color: var(--baseline); }
+  .tile.tile-open { border-color: var(--text-primary); }
+  .tile .label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; display: flex; align-items: center; justify-content: space-between; }
+  .tile .label .drill-hint { opacity: 0; font-size: 10px; transition: opacity .1s; }
+  .tile:hover .label .drill-hint { opacity: 0.6; }
+  .tile .value { font-size: 24px; font-weight: 650; letter-spacing: -0.01em; }
+  .tile .value.good { color: var(--good); } .tile .value.warning { color: var(--warning); } .tile .value.critical { color: var(--critical); }
+  .tile .sub { font-size: 11.5px; color: var(--text-secondary); margin-top: 2px; }
+  .tile .unit { font-size: 14px; font-weight: 500; color: var(--text-muted); margin-left: 2px; }
+  .tile-drill { grid-column: 1 / -1; background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; }
+
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
+  .status-dot.online { background: var(--good); } .status-dot.offline { background: var(--critical); }
+
+  table { width: 100%; border-collapse: collapse; background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; font-size: 13px; }
+  thead th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); font-weight: 600; padding: 10px 14px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  tbody td { padding: 9px 14px; border-bottom: 1px solid var(--grid); vertical-align: middle; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr.clickable { cursor: pointer; }
+  tbody tr.clickable:hover { background: color-mix(in srgb, var(--text-primary) 4%, transparent); }
+  .mono { font-variant-numeric: tabular-nums; }
+  .muted-cell { color: var(--text-muted); }
+  .name-cell { font-weight: 550; }
+
+  .badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px 3px 7px; border-radius: 999px; font-size: 11.5px; font-weight: 600; white-space: nowrap; }
+  .badge .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .badge.na { color: var(--text-muted); background: transparent; font-weight: 500; }
+
+  .util-bar { display: inline-flex; align-items: center; gap: 8px; min-width: 90px; }
+  .util-track { width: 60px; height: 6px; border-radius: 999px; background: var(--grid); overflow: hidden; flex: none; }
+  .util-fill { height: 100%; border-radius: 999px; }
+  .util-pct { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text-secondary); min-width: 30px; }
+  .retry-warn { display: inline-flex; align-items: center; gap: 4px; color: var(--serious); font-weight: 600; }
+
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px 10px; margin-bottom: 20px; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 6px; }
+  .card-title { font-size: 13.5px; font-weight: 650; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--text-secondary); }
+  .legend-item { display: inline-flex; align-items: center; gap: 6px; }
+  .legend-swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+
+  .chart-svg { width: 100%; height: auto; display: block; overflow: visible; }
+  .chart-line { fill: none; stroke-width: 2px; stroke-linecap: round; stroke-linejoin: round; }
+  .chart-area { stroke: none; fill-opacity: 0.12; }
+
+  .rtt-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; margin-top: 12px; }
+  .rtt-card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px 8px; }
+  .rtt-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+  .rtt-card-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); font-weight: 600; }
+  .rtt-card-title .rtt-proto { color: var(--text-secondary); }
+  .rtt-card-now { font-size: 14px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .rtt-spark { display: block; width: 100%; height: 44px; overflow: visible; }
+  .rtt-card-foot { font-size: 10.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; margin-top: 4px; }
+  .rtt-empty { font-size: 11.5px; color: var(--text-muted); padding: 12px 0; }
+
+  .bd-row { display: grid; grid-template-columns: 108px 1fr 74px; align-items: center; gap: 10px; padding: 3px 0; }
+  .bd-label { font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Both are <span>s: the track blockifies as a grid item, but the fill
+     would stay inline and silently ignore its width/height. */
+  .bd-track { display: block; height: 8px; border-radius: 999px; background: var(--grid); overflow: hidden; }
+  .bd-fill { display: block; height: 100%; border-radius: 999px; }
+  .bd-val { font-size: 11.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; text-align: right; }
+  .flow-chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+  .flow-ep { display: flex; flex-direction: column; line-height: 1.35; }
+  .flow-ep .ep-name { font-weight: 550; }
+  .flow-ep .ep-sub { font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+  .flow-dom { font-size: 11px; color: var(--text-secondary); }
+  .chart-grid-line { stroke: var(--grid); stroke-width: 1px; }
+  .chart-axis-label { fill: var(--text-muted); font-size: 10px; }
+  .chart-crosshair { stroke: var(--baseline); stroke-width: 1px; pointer-events: none; }
+  .chart-tooltip {
+    position: absolute; pointer-events: none; z-index: 5; background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px; font-size: 11.5px; box-shadow: 0 4px 14px rgba(0,0,0,0.12);
+    white-space: nowrap; opacity: 0; transition: opacity .08s;
+  }
+  .chart-tooltip .tt-time { color: var(--text-muted); font-size: 10.5px; margin-bottom: 4px; }
+  .chart-tooltip .tt-row { display: flex; align-items: center; gap: 6px; }
+  .chart-tooltip .tt-swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+  .chart-wrap { position: relative; }
+  .chart-empty { padding: 40px; text-align: center; color: var(--text-muted); font-size: 13px; }
+  .drill-title { font-size: 12px; font-weight: 650; color: var(--text-secondary); margin-bottom: 8px; }
+
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  .controls input[type="search"] { flex: 1 1 220px; min-width: 160px; padding: 8px 12px; font-size: 13px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); }
+  .chip-filter { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip-btn { font-size: 12px; padding: 6px 11px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary); cursor: pointer; font-family: inherit; display: inline-flex; align-items: center; gap: 6px; }
+  .chip-btn.active { color: var(--text-primary); border-color: currentColor; font-weight: 600; }
+  .chip-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .filter-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+  .filter-row .filter-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); margin-right: 2px; }
+
+  .ip { font-variant-numeric: tabular-nums; }
+  .mac { font-variant-numeric: tabular-nums; color: var(--text-secondary); font-size: 12px; }
+  .conn { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-secondary); }
+  .conn svg { flex: none; opacity: 0.7; }
+  .lastseen .rel { font-weight: 550; } .lastseen .abs { color: var(--text-muted); font-size: 11.5px; margin-left: 6px; }
+  .empty-row td { text-align: center; color: var(--text-muted); padding: 30px; font-size: 13px; }
+  footer.page-footer { margin-top: 16px; font-size: 12px; color: var(--text-muted); }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+  @media (max-width: 780px) { .mac, th[data-key="mac"] { display: none; } }
+
+  .vlan-detail { background: color-mix(in srgb, var(--text-primary) 3%, transparent); }
+  .vlan-detail-inner, .drill-inner { padding: 16px; }
+
+  .closest-wrap { position: relative; display: inline-flex; align-items: center; gap: 6px; }
+  .closest-badge { font-size: 11.5px; color: var(--text-secondary); }
+  .more-pill {
+    font-size: 10.5px; font-weight: 700; color: var(--text-secondary); background: var(--grid);
+    border-radius: 999px; padding: 2px 6px; cursor: default;
+  }
+  .more-pill:hover { background: var(--baseline); color: var(--text-primary); }
+  /* Floating (not row-relative) so it always renders above everything on the
+     page -- including an expanded neighbor's signal-strength drilldown chart
+     directly above/below it -- instead of being clipped by or overlapping
+     into that row's content. Position is computed in JS via getBoundingClientRect. */
+  .sightings-popover {
+    position: fixed; z-index: 50;
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 10px; font-size: 11.5px; box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+    min-width: 180px; display: none; white-space: nowrap; pointer-events: none;
+  }
+  .sightings-popover.visible { display: block; }
+  .sightings-popover .sp-row { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+  .sightings-popover .sp-row.best { font-weight: 650; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="app-header"><h1>UniFi Monitor</h1></div>
+  <p class="subtitle"><span class="live-dot" id="liveDot"></span><span id="liveStatus">Connecting…</span></p>
+
+  <div class="top-nav" id="topNav">
+    <button class="nav-btn active" data-page="overview">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
+      Overview
+    </button>
+    <button class="nav-btn" data-page="devices">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10v4M10 10v4M14 10v4M18 10v4"/></svg>
+      Devices
+    </button>
+    <button class="nav-btn" data-page="wifi">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5a11 11 0 0 1 14 0M8.5 16a6 6 0 0 1 7 0"/><circle cx="12" cy="19.5" r="1" fill="currentColor" stroke="none"/></svg>
+      WiFi
+    </button>
+    <button class="nav-btn" data-page="health">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+      Health
+    </button>
+    <button class="nav-btn" data-page="firewall">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      Firewall
+    </button>
+    <button class="nav-btn" data-page="routing">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3v12M18 9v12"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="6" r="3"/><path d="M6 15a6 6 0 0 0 6-6h3"/></svg>
+      Routing
+    </button>
+    <button class="nav-btn" data-page="flows">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h11M3 12h7M3 18h13"/><path d="M17 8l4 4-4 4"/></svg>
+      Flows
+    </button>
+    <button class="nav-btn" data-page="config">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="17" cy="18" r="2.5"/></svg>
+      Config
+    </button>
+    <button class="nav-btn" data-page="clients">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 21h8M12 18v3"/></svg>
+      Clients
+    </button>
+  </div>
+
+  <!-- ===================== OVERVIEW ===================== -->
+  <div class="page active" id="page-overview">
+    <!-- Wrapped in .controls like every other page-level control row. A bare
+         .seg is inline-flex, so its bottom margin adds to the following
+         section's 28px instead of collapsing with it. -->
+    <div class="controls">
+      <div class="seg" id="gatewaySeg">
+        <button class="seg-btn2 active" data-gw="primary">Primary (UDM Pro)</button>
+        <button class="seg-btn2" data-gw="cellular">Cellular failover (T-Mobile 5G)</button>
+      </div>
+    </div>
+
+    <section class="section" id="sec-gwstats" data-sec="gwstats">
+      <h2 class="section-title"><span class="chevron">▾</span>Gateway health<span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <p class="muted-cell" style="font-size:12px; margin-top:-6px;">Click a tile for its history.</p>
+        <div class="stats" id="ov-gateway-stats"></div>
+        <div id="tile-drill-area"></div>
+      </div>
+    </section>
+
+    <section class="section" id="sec-wan" data-sec="wan">
+      <h2 class="section-title"><span class="chevron">▾</span>WAN traffic<span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title" id="wan-chart-title">Download / upload throughput</div>
+            <div style="display:flex; align-items:center; gap:14px;">
+              <div class="legend">
+                <span class="legend-item"><span class="legend-swatch" style="background:var(--slot-1)"></span>Download</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:var(--slot-2)"></span>Upload</span>
+              </div>
+              <div class="seg" id="wanRangeSeg">
+                <button class="seg-btn2 active" data-range="24h">24h</button>
+                <button class="seg-btn2" data-range="7d">7 days</button>
+                <button class="seg-btn2" data-range="14d">14 days</button>
+                <button class="seg-btn2" data-range="30d">30 days</button>
+              </div>
+            </div>
+          </div>
+          <div class="stats" id="wan-usage-stats" style="margin-bottom:14px;"></div>
+          <div class="chart-wrap" id="wan-chart-wrap"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="sec-rtt" data-sec="rtt">
+      <h2 class="section-title"><span class="chevron">▾</span>RTT / ping latency<span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="stats" id="rtt-stats"></div>
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title" id="rtt-chart-title">Round-trip time</div>
+            <div class="legend"><span class="legend-item"><span class="legend-swatch" style="background:var(--slot-7)"></span>RTT</span></div>
+          </div>
+          <div class="chart-wrap" id="rtt-chart-wrap"></div>
+        </div>
+        <div id="rtt-monitors"></div>
+      </div>
+    </section>
+
+    <section class="section" id="sec-speedtest" data-sec="speedtest">
+      <h2 class="section-title"><span class="chevron">▾</span>Speedtest history<span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head"><div class="card-title">Download / upload (Mbps)</div>
+              <div class="legend">
+                <span class="legend-item"><span class="legend-swatch" style="background:var(--slot-1)"></span>Download</span>
+                <span class="legend-item"><span class="legend-swatch" style="background:var(--slot-2)"></span>Upload</span>
+              </div>
+            </div>
+            <div class="chart-wrap" id="speed-chart-wrap"></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><div class="card-title">Latency (ms)</div>
+              <div class="legend"><span class="legend-item"><span class="legend-swatch" style="background:var(--slot-7)"></span>Latency</span></div>
+            </div>
+            <div class="chart-wrap" id="latency-chart-wrap"></div>
+          </div>
+        </div>
+        <table style="margin-bottom:24px;"><thead><tr><th>Run</th><th>Download</th><th>Upload</th><th>Latency</th></tr></thead>
+          <tbody id="speed-tbody"></tbody></table>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- ===================== DEVICES ===================== -->
+  <div class="page" id="page-devices">
+    <p class="muted-cell" style="font-size:12px; margin:0 0 12px;">
+      Devices <span class="count-pill" id="ov-device-count"></span> — click a row for its port stats &amp; bandwidth history; click an individual port for its own history.
+    </p>
+    <table><thead id="ov-device-thead"><tr>
+      <th data-key="category" style="cursor:pointer;">Type<span class="arrow" style="opacity:.4; margin-left:3px; font-size:10px;">↕</span></th>
+      <th data-key="name" style="cursor:pointer;">Name<span class="arrow" style="opacity:.4; margin-left:3px; font-size:10px;">↕</span></th>
+      <th data-key="model" style="cursor:pointer;">Model<span class="arrow" style="opacity:.4; margin-left:3px; font-size:10px;">↕</span></th>
+      <th data-key="status" style="cursor:pointer;">Status<span class="arrow" style="opacity:.4; margin-left:3px; font-size:10px;">↕</span></th>
+      <th data-key="uptimeSec" style="cursor:pointer;">Uptime<span class="arrow" style="opacity:.4; margin-left:3px; font-size:10px;">↕</span></th>
+      <th data-key="ip" style="cursor:pointer;">IP<span class="arrow" style="opacity:.4; margin-left:3px; font-size:10px;">↕</span></th>
+      <th data-key="parent" style="cursor:pointer;">Parent<span class="arrow" style="opacity:.4; margin-left:3px; font-size:10px;">↕</span></th>
+      <th data-key="rxBps" style="cursor:pointer;">Download<span class="arrow" style="opacity:.4; margin-left:3px; font-size:10px;">↕</span></th>
+      <th data-key="txBps" style="cursor:pointer;">Upload<span class="arrow" style="opacity:.4; margin-left:3px; font-size:10px;">↕</span></th>
+    </tr></thead>
+      <tbody id="ov-device-tbody"></tbody></table>
+  </div>
+
+  <!-- ===================== WIFI ===================== -->
+  <div class="page" id="page-wifi">
+    <section class="section" id="sec-radios" data-sec="radios">
+      <h2 class="section-title"><span class="chevron">▾</span>Access point radios <span class="count-pill" id="wifi-ap-count"></span><span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="controls">
+          <div class="seg" id="apBandSeg">
+            <button class="seg-btn2 active" data-band="">All bands</button>
+            <button class="seg-btn2" data-band="ng">2.4GHz</button>
+            <button class="seg-btn2" data-band="na">5GHz</button>
+            <button class="seg-btn2" data-band="6e">6GHz</button>
+          </div>
+        </div>
+        <div class="filter-row"><span class="filter-label">AP</span><div class="chip-filter" id="ap-apFilter"></div></div>
+        <p class="muted-cell" style="font-size:12px; margin-top:-4px;">Click a row for its utilization/clients history.</p>
+        <table><thead><tr>
+          <th>AP</th><th>Band</th><th>Channel</th><th>TX Power</th><th>Utilization</th><th>Clients</th><th>Retry %</th><th>Uptime</th>
+        </tr></thead><tbody id="ap-tbody"></tbody></table>
+      </div>
+    </section>
+
+    <section class="section" id="sec-wifi-health" data-sec="wifi-health">
+      <h2 class="section-title"><span class="chevron">▾</span>WiFi health<span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="stats" id="wifi-health-tiles"></div>
+        <div id="wifi-doctor-note"></div>
+        <div class="grid-2" id="wifi-health-grid"></div>
+      </div>
+    </section>
+
+    <section class="section" id="sec-ap-usage" data-sec="ap-usage">
+      <h2 class="section-title"><span class="chevron">▾</span>AP data usage<span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="controls">
+          <div class="seg" id="apUsageRangeSeg">
+            <button class="seg-btn2" data-range="24h">24h</button>
+            <button class="seg-btn2 active" data-range="7d">7 days</button>
+            <button class="seg-btn2" data-range="30d">30 days</button>
+          </div>
+          <span class="muted-cell" style="font-size:12px;" id="ap-usage-note"></span>
+        </div>
+        <table><thead><tr><th>Access point</th><th>Download</th><th>Upload</th><th>Total</th><th>Share</th></tr></thead>
+          <tbody id="ap-usage-tbody"></tbody></table>
+      </div>
+    </section>
+
+    <section class="section" id="sec-wifi-channels" data-sec="wifi-channels">
+      <h2 class="section-title"><span class="chevron">▾</span>Channel usage<span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <p class="muted-cell" style="font-size:12px; margin-top:-6px;">Channels currently in use per band, with how many of your APs and clients sit on each.</p>
+        <div id="wifi-channel-grid" class="grid-2"></div>
+      </div>
+    </section>
+
+    <section class="section" id="sec-ap-density" data-sec="ap-density">
+      <h2 class="section-title"><span class="chevron">▾</span>AP radio density <span class="count-pill" id="wifi-density-count"></span><span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <p class="muted-cell" style="font-size:12px; margin-top:-6px;">Per-AP load and signal quality. "Weakest" is the average signal of that AP's worst clients — a good early warning for coverage gaps.</p>
+        <table><thead><tr>
+          <th>AP</th><th>Band</th><th>Clients</th><th>Avg signal</th><th>Weakest</th><th>Max PHY</th><th>Traffic share</th><th>TX retries</th>
+        </tr></thead><tbody id="wifi-density-tbody"></tbody></table>
+      </div>
+    </section>
+
+    <section class="section" id="sec-wireless-clients" data-sec="wireless-clients">
+      <h2 class="section-title"><span class="chevron">▾</span>Wireless clients <span class="count-pill" id="wc-count"></span><span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="controls">
+          <input type="search" id="wc-search" placeholder="Search client, AP, network, IP, MAC…" />
+        </div>
+        <div class="filter-row"><span class="filter-label">AP</span><div class="chip-filter" id="wc-apFilter"></div></div>
+        <table><thead><tr>
+          <th>Client</th><th>Network</th><th>AP</th><th>Band</th><th>Channel</th><th>TX Rate</th><th>RX Rate</th><th>Signal</th><th>Uptime</th>
+        </tr></thead><tbody id="wc-tbody"></tbody></table>
+      </div>
+    </section>
+
+    <section class="section" id="sec-vlans" data-sec="vlans">
+      <h2 class="section-title"><span class="chevron">▾</span>VLANs / subnets <span class="count-pill" id="vlan-count"></span><span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="card">
+          <div class="card-head">
+            <div class="card-title">Connected clients per network — last 24 hours</div>
+            <div class="legend" id="vlan-chart-legend"></div>
+          </div>
+          <div class="chart-wrap" id="vlan-chart-wrap"></div>
+        </div>
+
+        <div class="controls">
+          <span class="filter-label" style="text-transform:uppercase; font-size:11px; color:var(--text-muted);">Client list</span>
+          <div class="seg" id="vlanStatusSeg">
+            <button class="seg-btn2 active" data-status="online">Online</button>
+            <button class="seg-btn2" data-status="offline">Offline</button>
+          </div>
+        </div>
+        <p class="muted-cell" style="font-size:12px; margin-top:-4px;">Click a row to see its client list (online or offline, per the toggle above) and 7-day connected-count history.</p>
+        <table><thead><tr><th></th><th>Network</th><th>Connected clients</th></tr></thead>
+          <tbody id="vlan-tbody"></tbody></table>
+      </div>
+    </section>
+
+    <section class="section" id="sec-neighbors" data-sec="neighbors">
+      <h2 class="section-title"><span class="chevron">▾</span>Neighbor SSIDs <span class="count-pill" id="nb-count"></span><span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="controls">
+          <input type="search" id="nb-search" placeholder="Search SSID or vendor…" />
+          <div class="seg" id="nb-band-seg">
+            <button class="seg-btn2 active" data-band="">All bands</button>
+            <button class="seg-btn2" data-band="ng">2.4GHz</button>
+            <button class="seg-btn2" data-band="na">5GHz</button>
+            <button class="seg-btn2" data-band="6e">6GHz</button>
+          </div>
+        </div>
+        <div class="filter-row"><span class="filter-label">Closest AP</span><div class="chip-filter" id="nb-apFilter"></div></div>
+        <p class="muted-cell" style="font-size:12px; margin-top:-4px;">Click a row for its 30-day signal history. Hover the "+N" badge to compare per-AP signal.</p>
+        <table><thead><tr>
+          <th>Signal</th><th>SSID</th><th>Channel</th><th>Band</th><th>Vendor</th><th>Closest AP</th>
+        </tr></thead><tbody id="nb-tbody"></tbody></table>
+        <div class="controls" id="nb-pagination" style="justify-content:center; margin-top:12px;"></div>
+        <footer class="page-footer" id="nb-footer"></footer>
+      </div>
+    </section>
+  </div>
+
+  <!-- ===================== ROUTING ===================== -->
+  <div class="page" id="page-routing">
+    <section class="section" id="sec-rt-summary" data-sec="rt-summary">
+      <h2 class="section-title"><span class="chevron">▾</span>Routing summary<span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body"><div class="stats" id="rt-stats"></div></div>
+    </section>
+
+    <section class="section" id="sec-rt-routes" data-sec="rt-routes">
+      <h2 class="section-title"><span class="chevron">▾</span>Traffic routes <span class="count-pill" id="rt-route-count"></span><span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <p class="muted-cell" style="font-size:12px; margin-top:-6px;">Policy-based routing — which networks or clients get steered through which tunnel.</p>
+        <table><thead><tr><th>Route</th><th>Matches</th><th>Steers</th><th>Via</th><th>Kill switch</th><th>Status</th></tr></thead>
+          <tbody id="rt-route-tbody"></tbody></table>
+      </div>
+    </section>
+
+    <section class="section" id="sec-rt-vpn" data-sec="rt-vpn">
+      <h2 class="section-title"><span class="chevron">▾</span>VPN<span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="grid-2" id="rt-vpn-grid"></div>
+      </div>
+    </section>
+
+    <section class="section" id="sec-rt-qos" data-sec="rt-qos">
+      <h2 class="section-title"><span class="chevron">▾</span>QoS rules <span class="count-pill" id="rt-qos-count"></span><span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <p class="muted-cell" style="font-size:12px; margin-top:-6px;">Disabled rules are dimmed. The controller identifies QoS targets by numeric application/category id only — counts are shown rather than invented names.</p>
+        <table><thead><tr><th>Rule</th><th>Objective</th><th>Applies to</th><th>Download</th><th>Upload</th><th>Burst</th><th>Status</th></tr></thead>
+          <tbody id="rt-qos-tbody"></tbody></table>
+      </div>
+    </section>
+
+    <section class="section" id="sec-rt-ddns" data-sec="rt-ddns">
+      <h2 class="section-title"><span class="chevron">▾</span>Dynamic DNS <span class="count-pill" id="rt-ddns-count"></span><span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <table><thead><tr><th>Hostname</th><th>Service</th><th>Server</th><th>Interface</th></tr></thead>
+          <tbody id="rt-ddns-tbody"></tbody></table>
+      </div>
+    </section>
+  </div>
+
+  <!-- ===================== CONFIG ===================== -->
+  <div class="page" id="page-config">
+    <section class="section" id="sec-cf-wlans" data-sec="cf-wlans">
+      <h2 class="section-title"><span class="chevron">▾</span>Wireless networks <span class="count-pill" id="cf-wlan-count"></span><span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <table><thead><tr><th>SSID</th><th>Security</th><th>Band</th><th>Network</th><th>Bandwidth group</th><th>Guest</th><th>Hidden</th><th>Status</th></tr></thead>
+          <tbody id="cf-wlan-tbody"></tbody></table>
+      </div>
+    </section>
+
+    <section class="section" id="sec-cf-networks" data-sec="cf-networks">
+      <h2 class="section-title"><span class="chevron">▾</span>Networks <span class="count-pill" id="cf-net-count"></span><span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="controls">
+          <input type="search" id="cf-net-search" placeholder="Search name, subnet, purpose…" />
+        </div>
+        <table><thead><tr><th>Name</th><th>Purpose</th><th>VLAN</th><th>Subnet</th><th>DHCP range</th><th>DNS</th><th>Status</th></tr></thead>
+          <tbody id="cf-net-tbody"></tbody></table>
+      </div>
+    </section>
+
+    <section class="section" id="sec-cf-groups" data-sec="cf-groups">
+      <h2 class="section-title"><span class="chevron">▾</span>Bandwidth groups &amp; port profiles<span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body"><div class="grid-2" id="cf-groups-grid"></div></div>
+    </section>
+  </div>
+
+  <!-- ===================== FIREWALL ===================== -->
+  <div class="page" id="page-firewall">
+    <section class="section" id="sec-fw-summary" data-sec="fw-summary">
+      <h2 class="section-title"><span class="chevron">▾</span>Firewall summary<span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="stats" id="fw-stats"></div>
+      </div>
+    </section>
+
+    <section class="section" id="sec-fw-policies" data-sec="fw-policies">
+      <h2 class="section-title"><span class="chevron">▾</span>Policies <span class="count-pill" id="fw-policy-count"></span><span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <p class="muted-cell" style="font-size:12px; margin-top:-6px;">Sorted by hit count — the rules actually doing work appear first. Rules with no hits have never matched traffic.</p>
+        <table><thead><tr>
+          <th>Action</th><th>Name</th><th>Source</th><th>Destination</th><th>Protocol</th><th>Hits</th><th>Last hit</th><th>Status</th>
+        </tr></thead><tbody id="fw-policy-tbody"></tbody></table>
+      </div>
+    </section>
+
+    <section class="section" id="sec-fw-forwards" data-sec="fw-forwards">
+      <h2 class="section-title"><span class="chevron">▾</span>Port forwards <span class="count-pill" id="fw-pf-count"></span><span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <p class="muted-cell" style="font-size:12px; margin-top:-6px;">Inbound rules exposing internal hosts to the WAN.</p>
+        <table><thead><tr>
+          <th>Name</th><th>Protocol</th><th>WAN port</th><th>Forwards to</th><th>Source</th><th>Logging</th><th>Status</th>
+        </tr></thead><tbody id="fw-pf-tbody"></tbody></table>
+      </div>
+    </section>
+
+    <section class="section" id="sec-fw-groups" data-sec="fw-groups">
+      <h2 class="section-title"><span class="chevron">▾</span>Address &amp; port groups <span class="count-pill" id="fw-group-count"></span><span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="controls">
+          <input type="search" id="fw-group-search" placeholder="Search group name or member…" />
+          <div class="seg" id="fwGroupTypeSeg"></div>
+        </div>
+        <table><thead><tr><th>Group</th><th>Type</th><th>Members</th></tr></thead>
+          <tbody id="fw-group-tbody"></tbody></table>
+      </div>
+    </section>
+
+    <section class="section" id="sec-fw-zones" data-sec="fw-zones">
+      <h2 class="section-title"><span class="chevron">▾</span>Zones <span class="count-pill" id="fw-zone-count"></span><span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="rtt-grid" id="fw-zone-grid"></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ===================== HEALTH ===================== -->
+  <div class="page" id="page-health">
+    <section class="section" id="sec-health-status" data-sec="health-status">
+      <h2 class="section-title"><span class="chevron">▾</span>Subsystem status<span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="stats" id="health-subsystems"></div>
+        <div class="stats" id="health-meta" style="margin-top:2px;"></div>
+      </div>
+    </section>
+
+    <section class="section" id="sec-health-anomalies" data-sec="health-anomalies">
+      <h2 class="section-title"><span class="chevron">▾</span>Anomalies <span class="count-pill" id="health-anom-count"></span><span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <p class="muted-cell" style="font-size:12px; margin-top:-6px;">The controller's own diagnosis of recent client and AP problems.</p>
+        <table><thead><tr><th>Issue</th><th>Client / AP</th><th>MAC</th><th>Occurrences</th><th>Last seen</th></tr></thead>
+          <tbody id="health-anom-tbody"></tbody></table>
+      </div>
+    </section>
+
+    <section class="section" id="sec-health-events" data-sec="health-events">
+      <h2 class="section-title"><span class="chevron">▾</span>Event log <span class="count-pill" id="health-event-count"></span><span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="controls">
+          <input type="search" id="health-event-search" placeholder="Search message, client, AP…" />
+          <div class="seg" id="healthSevSeg">
+            <button class="seg-btn2 active" data-sev="">All severities</button>
+            <button class="seg-btn2" data-sev="HIGH">High</button>
+            <button class="seg-btn2" data-sev="MEDIUM">Medium</button>
+            <button class="seg-btn2" data-sev="LOW">Low</button>
+          </div>
+        </div>
+        <div class="filter-row"><span class="filter-label">Category</span><div class="chip-filter" id="health-cat-filter"></div></div>
+        <table><thead><tr><th>Time</th><th>Severity</th><th>Category</th><th>Event</th></tr></thead>
+          <tbody id="health-event-tbody"></tbody></table>
+        <div class="controls" id="health-event-pagination" style="justify-content:center; margin-top:12px;"></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ===================== FLOWS ===================== -->
+  <div class="page" id="page-flows">
+    <div class="controls" style="margin-bottom:16px;">
+      <div class="seg" id="flowPeriodSeg">
+        <button class="seg-btn2" data-period="HOUR">Hour</button>
+        <button class="seg-btn2 active" data-period="DAY">Day</button>
+        <button class="seg-btn2" data-period="WEEK">Week</button>
+      </div>
+      <span class="muted-cell" style="font-size:12px;" id="flow-period-note"></span>
+    </div>
+
+    <section class="section" id="sec-flow-summary" data-sec="flow-summary">
+      <h2 class="section-title"><span class="chevron">▾</span>Flow summary<span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="stats" id="flow-stats"></div>
+        <div id="flow-breakdowns" class="grid-2" style="margin-top:4px;"></div>
+      </div>
+    </section>
+
+    <section class="section" id="sec-flow-top" data-sec="flow-top">
+      <h2 class="section-title"><span class="chevron">▾</span>Top talkers<span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="grid-2" id="flow-top-grid"></div>
+      </div>
+    </section>
+
+    <section class="section" id="sec-flow-policy" data-sec="flow-policy">
+      <h2 class="section-title"><span class="chevron">▾</span>Blocked traffic &amp; destinations<span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="grid-2" id="flow-policy-grid"></div>
+      </div>
+    </section>
+
+    <section class="section" id="sec-flow-regions" data-sec="flow-regions">
+      <h2 class="section-title"><span class="chevron">▾</span>Destination regions <span class="count-pill" id="flow-region-count"></span><span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <table><thead><tr><th>Region</th><th>Flows</th><th>Share</th><th>Blocked</th></tr></thead>
+          <tbody id="flow-region-tbody"></tbody></table>
+      </div>
+    </section>
+
+    <section class="section" id="sec-flow-log" data-sec="flow-log">
+      <h2 class="section-title"><span class="chevron">▾</span>Recent flows <span class="count-pill" id="flow-log-count"></span><span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="controls">
+          <input type="search" id="flow-search" placeholder="Search host, IP, domain, network, policy…" />
+          <div class="seg" id="flowActionSeg">
+            <button class="seg-btn2 active" data-action="">All</button>
+            <button class="seg-btn2" data-action="allowed">Allowed</button>
+            <button class="seg-btn2" data-action="blocked">Blocked</button>
+          </div>
+          <div class="seg" id="flowDirSeg">
+            <button class="seg-btn2 active" data-dir="">Any direction</button>
+            <button class="seg-btn2" data-dir="outgoing">Outgoing</button>
+            <button class="seg-btn2" data-dir="local">Local</button>
+            <button class="seg-btn2" data-dir="incoming">Incoming</button>
+          </div>
+        </div>
+        <p class="muted-cell" style="font-size:12px; margin-top:-4px;" id="flow-log-note"></p>
+        <table><thead><tr>
+          <th>Time</th><th>Action</th><th>Source</th><th>Destination</th><th>Service</th><th>Proto</th><th>Dir</th><th>Bytes</th><th>Policy</th>
+        </tr></thead><tbody id="flow-log-tbody"></tbody></table>
+        <div class="controls" id="flow-log-pagination" style="justify-content:center; margin-top:12px;"></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ===================== CLIENTS ===================== -->
+  <div class="page" id="page-clients">
+    <section class="section" id="sec-cl-usage" data-sec="cl-usage">
+      <h2 class="section-title"><span class="chevron">▾</span>Top clients by data usage<span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="controls">
+          <div class="seg" id="clUsageRangeSeg">
+            <button class="seg-btn2" data-range="24h">24h</button>
+            <button class="seg-btn2 active" data-range="7d">7 days</button>
+            <button class="seg-btn2" data-range="30d">30 days</button>
+          </div>
+          <span class="muted-cell" style="font-size:12px;" id="cl-usage-note"></span>
+        </div>
+        <table><thead><tr><th>Client</th><th>MAC</th><th>Download</th><th>Upload</th><th>Total</th><th>Share</th></tr></thead>
+          <tbody id="cl-usage-tbody"></tbody></table>
+      </div>
+    </section>
+
+    <section class="section" id="sec-cl-list" data-sec="cl-list">
+      <h2 class="section-title"><span class="chevron">▾</span>Client list<span class="drag-handle" draggable="true" title="Drag to reorder">⠿⠿</span></h2>
+      <div class="section-body">
+        <div class="top-nav" id="cl-tabs" style="margin-bottom:16px;"></div>
+        <div class="stats" id="cl-stats"></div>
+        <div class="controls">
+          <input type="search" id="cl-search" placeholder="Search IP, hostname, MAC…" />
+          <div class="seg" id="cl-connFilter"></div>
+        </div>
+        <div class="filter-row"><span class="filter-label">Network</span><div class="chip-filter" id="cl-netFilter"></div></div>
+        <table><thead id="cl-thead"></thead><tbody id="cl-tbody"></tbody></table>
+        <div class="controls" id="cl-pagination" style="justify-content:center; margin-top:12px;"></div>
+        <footer class="page-footer" id="cl-footer"></footer>
+      </div>
+    </section>
+  </div>
+</div>
+<div class="sightings-popover" id="sightingsPopover"></div>
+
+<script>
+// Populated from /api/networks (the controller's real network list) rather
+// than hardcoded -- a hardcoded copy silently drops any VLAN it doesn't know
+// about, which is how the VPN subnets used to end up labelled "other".
+const NETWORKS = {};
+async function loadNetworks() {
+  const res = await fetch("/api/networks");
+  const names = await res.json();
+  Object.keys(NETWORKS).forEach(k => delete NETWORKS[k]);
+  // Deterministic colour per network: stable across reloads, cycles if the
+  // site ever has more networks than palette slots.
+  names.forEach((name, i) => {
+    NETWORKS[name] = { label: name, slot: `--slot-${(i % 8) + 1}` };
+  });
+}
+const wiredIcon = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 9h16M7 9v6a2 2 0 0 0 2 2h2M17 9v6a2 2 0 0 1-2 2h-2m-1 0v3"/></svg>`;
+const wifiIcon = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5a11 11 0 0 1 14 0M8.5 16a6 6 0 0 1 7 0"/><circle cx="12" cy="19.5" r="1" fill="currentColor" stroke="none"/></svg>`;
+const warnIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"/></svg>`;
+
+function fmtBits(bps) {
+  if (bps == null) return "—";
+  if (Math.abs(bps) >= 1e6) return (bps/1e6).toFixed(1) + " Mbps";
+  if (Math.abs(bps) >= 1e3) return (bps/1e3).toFixed(0) + " Kbps";
+  return bps.toFixed(0) + " bps";
+}
+function fmtBytes(bytes) {
+  if (bytes == null) return "—";
+  if (Math.abs(bytes) >= 1e9) return (bytes/1e9).toFixed(1) + " GB";
+  if (Math.abs(bytes) >= 1e6) return (bytes/1e6).toFixed(0) + " MB";
+  if (Math.abs(bytes) >= 1e3) return (bytes/1e3).toFixed(0) + " KB";
+  return bytes.toFixed(0) + " B";
+}
+function fmtUptime(sec) {
+  if (sec == null) return "—";
+  const d = Math.floor(sec/86400), h = Math.floor((sec%86400)/3600), m = Math.floor((sec%3600)/60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+function cpuColor(pct) { if (pct == null) return ""; return pct >= 85 ? "critical" : pct >= 65 ? "warning" : "good"; }
+function memColor(pct) { if (pct == null) return ""; return pct >= 90 ? "critical" : pct >= 80 ? "warning" : "good"; }
+function tempColor(c) { if (c == null) return ""; return c >= 75 ? "critical" : c >= 60 ? "warning" : "good"; }
+function utilColor(pct) { return pct >= 80 ? "var(--critical)" : pct >= 50 ? "var(--warning)" : "var(--good)"; }
+// Retry%: >80 red, >50 orange, >10 yellow, else normal.
+function retryColor(pct) {
+  if (pct > 80) return "var(--critical)";
+  if (pct > 50) return "var(--serious)";
+  if (pct > 10) return "var(--warning)";
+  return null;
+}
+// Signal dBm: -60 or stronger = green, -60..-80 = yellow, weaker than -80 = red.
+function signalColor(dbm) {
+  if (dbm == null) return null;
+  if (dbm >= -60) return "var(--good)";
+  if (dbm >= -80) return "var(--warning)";
+  return "var(--critical)";
+}
+// RTT: our wired WAN sits ~10ms and the 5G failover ~50ms, so 30/80 splits
+// "healthy wired", "expected on cellular / mildly degraded", and "bad".
+function latencyColor(ms) {
+  if (ms == null) return null;
+  if (ms < 30) return "var(--good)";
+  if (ms < 80) return "var(--warning)";
+  return "var(--critical)";
+}
+
+// ============================================================
+// Shared pagination
+// ============================================================
+const PAGE_SIZE = 25;
+function paginate(rows, page) {
+  const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const clampedPage = Math.min(Math.max(1, page), totalPages);
+  const start = (clampedPage - 1) * PAGE_SIZE;
+  return { pageRows: rows.slice(start, start + PAGE_SIZE), totalPages, clampedPage };
+}
+function renderPaginationControls(el, page, totalPages, onChange) {
+  if (!el) return;
+  if (totalPages <= 1) { el.innerHTML = ""; return; }
+  el.innerHTML = `
+    <button class="seg-btn2" id="${el.id}-prev" ${page<=1?'disabled':''} style="${page<=1?'opacity:.4;cursor:default;':''}">← Prev</button>
+    <span class="muted-cell" style="font-size:12px; padding:0 10px;">Page ${page} of ${totalPages}</span>
+    <button class="seg-btn2" id="${el.id}-next" ${page>=totalPages?'disabled':''} style="${page>=totalPages?'opacity:.4;cursor:default;':''}">Next →</button>
+  `;
+  const prevBtn = document.getElementById(`${el.id}-prev`), nextBtn = document.getElementById(`${el.id}-next`);
+  if (page > 1) prevBtn.addEventListener("click", () => onChange(page - 1));
+  if (page < totalPages) nextBtn.addEventListener("click", () => onChange(page + 1));
+}
+function networkMeta(net) { return NETWORKS[net]; }
+
+// ============================================================
+// Shared AP chip filter — used by AP radios, Wireless clients and
+// Neighbor SSIDs. `aps` is [{mac, name}] built from the data actually on
+// screen, so a chip never matches zero rows. Rebuilds are skipped unless
+// the option set or selection changed, since the callers re-render on
+// every 1s tick and needlessly recreating the buttons makes them flicker
+// and drops any :active/focus state mid-click.
+// ============================================================
+function renderApChipFilter(el, aps, selected, onSelect) {
+  if (!el) return;
+  const opts = [...new Map(aps.filter(a => a.mac).map(a => [a.mac, a])).values()]
+    .sort((a, b) => (a.name || a.mac).localeCompare(b.name || b.mac));
+  const sig = opts.map(a => a.mac + ":" + (a.name || "")).join("|") + "||" + selected;
+  if (el.dataset.sig === sig) return;
+  el.dataset.sig = sig;
+
+  el.innerHTML = "";
+  const mk = (mac, label) => {
+    const b = document.createElement("button");
+    b.className = "chip-btn" + (selected === mac ? " active" : "");
+    b.dataset.mac = mac;
+    b.textContent = label;
+    b.addEventListener("click", () => onSelect(mac));
+    el.appendChild(b);
+  };
+  mk("", "All APs");
+  opts.forEach(a => mk(a.mac, a.name || a.mac));
+}
+
+// ============================================================
+// Page nav
+// ============================================================
+document.getElementById("topNav").addEventListener("click", e => {
+  const btn = e.target.closest(".nav-btn");
+  if (!btn) return;
+  document.querySelectorAll("#topNav .nav-btn").forEach(b => b.classList.toggle("active", b === btn));
+  const key = btn.dataset.page;
+  document.querySelectorAll(".page").forEach(p => p.classList.toggle("active", p.id === "page-" + key));
+});
+
+// ============================================================
+// Collapsible sections (state remembered in localStorage)
+// ============================================================
+document.querySelectorAll("section.section").forEach(sec => {
+  const key = "collapsed:" + sec.dataset.sec;
+  if (localStorage.getItem(key) === "1") sec.classList.add("collapsed");
+  sec.querySelector(":scope > h2.section-title").addEventListener("click", e => {
+    if (e.target.closest(".drag-handle")) return; // dragging, not collapsing
+    sec.classList.toggle("collapsed");
+    localStorage.setItem(key, sec.classList.contains("collapsed") ? "1" : "0");
+  });
+});
+
+// ============================================================
+// Drag-and-drop section reordering (order remembered in localStorage)
+// ============================================================
+function restoreSectionOrder(pageEl, pageKey) {
+  const saved = localStorage.getItem("sectionOrder:" + pageKey);
+  if (!saved) return;
+  let order;
+  try { order = JSON.parse(saved); } catch (e) { return; }
+  const secMap = {};
+  pageEl.querySelectorAll(":scope > section.section").forEach(s => { secMap[s.dataset.sec] = s; });
+  order.forEach(key => { if (secMap[key]) pageEl.appendChild(secMap[key]); });
+  // Any section not present in the saved order (e.g. added after the user
+  // last rearranged) keeps its natural place at the end.
+  Object.keys(secMap).forEach(key => { if (!order.includes(key)) pageEl.appendChild(secMap[key]); });
+}
+
+function saveSectionOrder(pageEl, pageKey) {
+  const order = Array.from(pageEl.querySelectorAll(":scope > section.section")).map(s => s.dataset.sec);
+  localStorage.setItem("sectionOrder:" + pageKey, JSON.stringify(order));
+}
+
+function setupSectionDragDrop(pageEl, pageKey) {
+  let draggingSec = null;
+  const allSections = () => Array.from(pageEl.querySelectorAll(":scope > section.section"));
+
+  allSections().forEach(sec => {
+    const handle = sec.querySelector(".drag-handle");
+    if (!handle) return;
+
+    handle.addEventListener("dragstart", e => {
+      draggingSec = sec;
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", sec.dataset.sec);
+      requestAnimationFrame(() => sec.classList.add("dragging"));
+    });
+    handle.addEventListener("dragend", () => {
+      sec.classList.remove("dragging");
+      allSections().forEach(s => s.classList.remove("drag-over-top", "drag-over-bottom"));
+      draggingSec = null;
+    });
+  });
+
+  pageEl.addEventListener("dragover", e => {
+    if (!draggingSec) return;
+    const target = e.target.closest("section.section");
+    if (!target || target === draggingSec) return;
+    e.preventDefault();
+    const rect = target.getBoundingClientRect();
+    const before = (e.clientY - rect.top) < rect.height / 2;
+    allSections().forEach(s => s.classList.remove("drag-over-top", "drag-over-bottom"));
+    target.classList.add(before ? "drag-over-top" : "drag-over-bottom");
+  });
+
+  pageEl.addEventListener("drop", e => {
+    if (!draggingSec) return;
+    const target = e.target.closest("section.section");
+    if (!target || target === draggingSec) return;
+    e.preventDefault();
+    const rect = target.getBoundingClientRect();
+    const before = (e.clientY - rect.top) < rect.height / 2;
+    pageEl.insertBefore(draggingSec, before ? target : target.nextSibling);
+    target.classList.remove("drag-over-top", "drag-over-bottom");
+    saveSectionOrder(pageEl, pageKey);
+  });
+}
+
+["overview", "wifi", "flows", "health", "firewall", "routing", "config", "clients"].forEach(pageKey => {
+  const pageEl = document.getElementById("page-" + pageKey);
+  restoreSectionOrder(pageEl, pageKey);
+  setupSectionDragDrop(pageEl, pageKey);
+});
+
+// ============================================================
+// Generic line chart (bucketed [{t, ...}] history from the API)
+// ============================================================
+// `xValues` (optional): numeric x per point, normally epoch ms. When given,
+// points are positioned by VALUE instead of by array index, so a series that
+// mixes granularities -- e.g. backfilled daily rows for old data plus
+// per-minute live rows for today -- is drawn to scale instead of giving every
+// sample equal width. Without it, 22 of a 30-day chart's days collapsed into
+// ~1.5% of the width. Omit it and behaviour is exactly as before.
+function renderLineChart(wrapEl, { series, xLabels, xValues, yFormat, height = 220, yFormatShort }) {
+  // "All values null" counts as no data too -- otherwise we'd draw an empty
+  // grid with meaningless auto-scaled axis labels, which reads as a broken
+  // chart rather than an honest "nothing measured here".
+  const hasAnyValue = series.some(s => s.data.some(v => v != null));
+  if (!series[0] || series[0].data.length === 0 || !hasAnyValue) {
+    wrapEl.innerHTML = `<div class="chart-empty">No data yet for this range — check back once the live server has been running a little longer.</div>`;
+    return;
+  }
+  const width = 900;
+  const padL = 46, padR = 12, padT = 12, padB = 26;
+  const plotW = width - padL - padR, plotH = height - padT - padB;
+  const n = series[0].data.length;
+  const allVals = series.flatMap(s => s.data.filter(v => v != null));
+  const rawMax = allVals.length ? Math.max(...allVals) : 1;
+  const rawMin = allVals.length ? Math.min(...allVals) : 0;
+  // Most series here are non-negative (Mbps, %, client counts) and read best
+  // anchored to a zero baseline. Signal-strength (dBm) is the exception --
+  // it's always negative, so a hardcoded yMin=0 would put every real point
+  // off the bottom of the chart. Only switch to a data-fit range when the
+  // series actually dips negative; leaves every existing chart unchanged.
+  const hasNegative = rawMin < 0;
+  const pad = Math.max(1, rawMax - rawMin) * 0.12;
+  const yMax = hasNegative ? rawMax + pad : Math.max(1, rawMax) * 1.12;
+  const yMin = hasNegative ? rawMin - pad : 0;
+  // Time-proportional when xValues are supplied and actually span a range;
+  // otherwise fall back to even index spacing.
+  const xs = Array.isArray(xValues) && xValues.length === n ? xValues : null;
+  const xMin = xs ? Math.min(...xs) : 0;
+  const xMax = xs ? Math.max(...xs) : 0;
+  const xSpan = xMax - xMin;
+  const useTime = xs && xSpan > 0;
+  const xAt = i => useTime
+    ? padL + ((xs[i] - xMin) / xSpan) * plotW
+    : padL + (n <= 1 ? 0 : (i / (n - 1)) * plotW);
+  // Inverse of xAt: nearest point to a plot x-coordinate. xs is sorted
+  // ascending (rows come back ORDER BY bucket), so binary search keeps hover
+  // cheap even at tens of thousands of points.
+  const indexAtX = svgX => {
+    if (n <= 1) return 0;
+    if (!useTime) return Math.max(0, Math.min(n - 1, Math.round(((svgX - padL) / plotW) * (n - 1))));
+    const target = xMin + ((svgX - padL) / plotW) * xSpan;
+    let lo = 0, hi = n - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (xs[mid] < target) lo = mid + 1; else hi = mid;
+    }
+    if (lo > 0 && Math.abs(xs[lo - 1] - target) <= Math.abs(xs[lo] - target)) lo -= 1;
+    return lo;
+  };
+  const yAt = v => padT + plotH - (((v ?? 0) - yMin) / (yMax - yMin)) * plotH;
+
+  let gridLines = "", yLabels = "";
+  for (let g = 0; g <= 4; g++) {
+    const v = yMin + (yMax - yMin) * (g / 4);
+    const y = yAt(v);
+    gridLines += `<line class="chart-grid-line" x1="${padL}" y1="${y}" x2="${width - padR}" y2="${y}"/>`;
+    yLabels += `<text class="chart-axis-label" x="${padL - 8}" y="${y + 3}" text-anchor="end">${(yFormatShort||yFormat)(v)}</text>`;
+  }
+  let xLabelsSvg = "";
+  if (useTime) {
+    // Sample labels at even POSITIONS across the plot. Stepping by index here
+    // would bunch every label into whichever region has the densest samples.
+    const seen = new Set();
+    for (let g = 0; g <= 7; g++) {
+      const x = padL + (g / 7) * plotW;
+      const i = indexAtX(x);
+      if (seen.has(i)) continue; // sparse data: don't repeat the same point
+      seen.add(i);
+      xLabelsSvg += `<text class="chart-axis-label" x="${x.toFixed(1)}" y="${height - 6}" text-anchor="middle">${xLabels[i]}</text>`;
+    }
+  } else {
+    const xLabelStep = Math.max(1, Math.floor(n / 7));
+    for (let i = 0; i < n; i += xLabelStep) {
+      xLabelsSvg += `<text class="chart-axis-label" x="${xAt(i)}" y="${height - 6}" text-anchor="middle">${xLabels[i]}</text>`;
+    }
+  }
+  let paths = "";
+  const baseY = padT + plotH; // bottom of the plot -- fills always sit on the axis floor, even when yMin is negative (dBm charts)
+  series.forEach(s => {
+    const ptsArr = [];
+    s.data.forEach((v, i) => { if (v != null) ptsArr.push([xAt(i), yAt(v)]); });
+    if (ptsArr.length > 0) {
+      const first = ptsArr[0], last = ptsArr[ptsArr.length - 1];
+      const areaD = `M${first[0].toFixed(1)},${baseY.toFixed(1)} L${ptsArr.map(([x,y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" L")} L${last[0].toFixed(1)},${baseY.toFixed(1)} Z`;
+      paths += `<path class="chart-area" d="${areaD}" fill="var(${s.color})"/>`;
+    }
+    const pts = ptsArr.map(([x,y]) => `${x.toFixed(1)},${y.toFixed(1)}`);
+    paths += `<polyline class="chart-line" points="${pts.join(" ")}" stroke="var(${s.color})"/>`;
+    const lastIdx = s.data.map((v,i)=>v==null?-1:i).filter(i=>i>=0).pop();
+    if (lastIdx != null) paths += `<circle class="chart-dot" cx="${xAt(lastIdx)}" cy="${yAt(s.data[lastIdx])}" r="3" fill="var(${s.color})"/>`;
+  });
+  const svgId = "chart-" + Math.random().toString(36).slice(2, 9);
+  wrapEl.innerHTML = `
+    <svg class="chart-svg" id="${svgId}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">
+      ${gridLines}${yLabels}${xLabelsSvg}${paths}
+      <line class="chart-crosshair" id="${svgId}-cross" x1="0" y1="${padT}" x2="0" y2="${padT+plotH}" style="opacity:0"/>
+      ${series.map(s => `<circle class="chart-dot" id="${svgId}-dot-${s.key}" r="3.5" fill="var(${s.color})" style="opacity:0; stroke:var(--surface-1); stroke-width:1.5"/>`).join("")}
+      <rect class="hover-overlay" x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="transparent"/>
+    </svg>
+    <div class="chart-tooltip" id="${svgId}-tooltip"></div>
+  `;
+  const svg = document.getElementById(svgId);
+  const cross = document.getElementById(svgId + "-cross");
+  const tooltip = document.getElementById(svgId + "-tooltip");
+  // A single overlay rect + computed nearest-index beats one <rect> per data
+  // point once ranges get bucketed to per-minute resolution (thousands of
+  // points) -- that many hover-target elements visibly lags the browser.
+  const overlay = svg.querySelector(".hover-overlay");
+  const updateHover = clientX => {
+    const rect = svg.getBoundingClientRect(), scaleX = width / rect.width;
+    const svgX = (clientX - rect.left) * scaleX;
+    const i = indexAtX(svgX);
+    const x = xAt(i);
+    cross.setAttribute("x1", x); cross.setAttribute("x2", x); cross.style.opacity = 1;
+    series.forEach(s => {
+      const dot = document.getElementById(svgId + "-dot-" + s.key);
+      if (s.data[i] == null) { dot.style.opacity = 0; return; }
+      dot.setAttribute("cx", x); dot.setAttribute("cy", yAt(s.data[i])); dot.style.opacity = 1;
+    });
+    const scaleXDisp = rect.width / width;
+    tooltip.style.opacity = 1;
+    tooltip.style.left = Math.min(rect.width - 140, Math.max(0, x * scaleXDisp + 10)) + "px";
+    tooltip.style.top = "6px";
+    tooltip.innerHTML = `<div class="tt-time">${xLabels[i]}</div>` + series.map(s =>
+      s.data[i] == null ? "" : `<div class="tt-row"><span class="tt-swatch" style="background:var(${s.color})"></span>${s.name}: <strong style="margin-left:auto">${yFormat(s.data[i])}</strong></div>`
+    ).join("");
+  };
+  overlay.addEventListener("mousemove", e => updateHover(e.clientX));
+  overlay.addEventListener("mouseleave", () => {
+    cross.style.opacity = 0;
+    series.forEach(s => document.getElementById(svgId + "-dot-" + s.key).style.opacity = 0);
+    tooltip.style.opacity = 0;
+  });
+}
+
+// Epoch ms for a history bucket, parsed the same way bucketLabel does (the
+// backend emits naive-UTC bucket strings). Feeds renderLineChart's xValues.
+function bucketTime(t) { return new Date(t + "Z").getTime(); }
+
+function bucketLabel(t, range) {
+  const d = new Date(t + "Z");
+  if (range === "24h") return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  // 14d/30d span multiple weeks -- a weekday name alone ("Mon") is ambiguous
+  // about which week, so use the actual date instead. 7d fits in one week,
+  // where "Mon" unambiguously reads as "yesterday" style.
+  if (range === "14d" || range === "30d") return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " + d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return d.toLocaleDateString(undefined, { weekday: "short" }) + " " + d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+}
+
+// ============================================================
+// WebSocket live tick
+// ============================================================
+let latestTick = null;
+const liveDot = document.getElementById("liveDot"), liveStatus = document.getElementById("liveStatus");
+function connectWs() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => { liveDot.className = "live-dot connected"; liveStatus.textContent = "Live"; };
+  ws.onclose = () => {
+    liveDot.className = "live-dot reconnecting"; liveStatus.textContent = "Reconnecting…";
+    setTimeout(connectWs, 2000);
+  };
+  ws.onerror = () => ws.close();
+  ws.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === "tick") { latestTick = msg; onTick(msg); }
+    else if (msg.type === "offline-update") { onOfflineUpdate(msg.offline); }
+    else if (msg.type === "neighbors-update") { neighbors = msg.neighbors; renderNeighbors(); }
+  };
+}
+
+function onTick(tick) {
+  renderGatewayStats(tick);
+  renderRttSection(tick);
+  renderDeviceTable(tick.devices);
+  renderApTable(tick.aps);
+  renderWirelessClientsTable(tick.onlineClients);
+  renderVlanSummary(tick.vlanCounts);
+  onOnlineUpdate(tick.onlineClients);
+}
+
+// ============================================================
+// OVERVIEW — gateway tiles + drill-down
+// ============================================================
+let selectedGateway = "primary";
+let lastGwHistory = [];
+let openTile = null;
+document.getElementById("gatewaySeg").addEventListener("click", e => {
+  const btn = e.target.closest(".seg-btn2");
+  if (!btn) return;
+  selectedGateway = btn.dataset.gw;
+  document.querySelectorAll("#gatewaySeg .seg-btn2").forEach(b => b.classList.toggle("active", b === btn));
+  openTile = null;
+  if (latestTick) { renderGatewayStats(latestTick); renderRttSection(latestTick); }
+  loadWanChart(); loadSpeedtest(); loadWanUsage(); loadRttMonitors();
+});
+
+const TILE_METRICS = {
+  cpu: { label: "CPU", unit: "%", series: [{ key: "cpu", name: "CPU", color: "--slot-1", get: r => r.cpu }] },
+  mem: { label: "Memory", unit: "%", series: [{ key: "mem", name: "Memory", color: "--slot-2", get: r => r.mem }] },
+  load1: { label: "Load average (1m)", unit: "", series: [{ key: "load1", name: "Load avg (1m)", color: "--slot-3", get: r => r.load1 }] },
+  tempCpu: { label: "CPU temperature", unit: "°C", series: [{ key: "tempCpu", name: "CPU temp", color: "--slot-8", get: r => r.tempCpu }] },
+  throughput: {
+    label: "Throughput", unit: "Mbps",
+    series: [
+      { key: "down", name: "Download", color: "--slot-1", get: r => r.rxRateBps != null ? r.rxRateBps/1e6 : null },
+      { key: "up", name: "Upload", color: "--slot-2", get: r => r.txRateBps != null ? r.txRateBps/1e6 : null },
+    ],
+  },
+};
+
+function renderGatewayStats(tick) {
+  const gw = tick.gateways && tick.gateways[selectedGateway];
+  const statsEl = document.getElementById("ov-gateway-stats");
+  if (!gw) {
+    statsEl.innerHTML = `<div class="tile"><div class="label">Gateway</div><div class="value muted-cell" style="font-size:15px;">Not detected in this poll</div></div>`;
+    return;
+  }
+  const onlineDevices = (tick.devices || []).filter(d => d.status === "online").length;
+  const clientsOnline = tick.clientsOnline ?? 0;
+  const throughputTile = `
+    <div class="tile" data-metric="throughput">
+      <div class="label">Throughput now<span class="drill-hint">history ▾</span></div>
+      <div class="value" style="font-size:18px; line-height:1.5;">↓ ${fmtBits(gw.rxRateBps)}<br>↑ ${fmtBits(gw.txRateBps)}</div>
+    </div>`;
+  if (selectedGateway === "primary") {
+    statsEl.innerHTML = `
+      <div class="tile" data-metric="cpu"><div class="label">Gateway CPU<span class="drill-hint">history ▾</span></div><div class="value ${cpuColor(gw.cpu)}">${gw.cpu ?? "—"}<span class="unit">%</span></div><div class="sub">${gw.name || ""} · load ${gw.load1 ?? "—"} / ${gw.load5 ?? "—"} / ${gw.load15 ?? "—"}</div></div>
+      <div class="tile" data-metric="mem"><div class="label">Gateway memory<span class="drill-hint">history ▾</span></div><div class="value ${memColor(gw.mem)}">${gw.mem ?? "—"}<span class="unit">%</span></div><div class="sub">uptime ${fmtUptime(gw.uptimeSec)}</div></div>
+      <div class="tile" data-metric="tempCpu"><div class="label">Gateway temperature<span class="drill-hint">history ▾</span></div><div class="value ${tempColor(gw.tempCpu)}">${gw.tempCpu ?? "—"}<span class="unit">°C</span></div><div class="sub">Local ${gw.tempLocal ?? "—"}° · PHY ${gw.tempPhy ?? "—"}°</div></div>
+      <div class="tile"><div class="label">Devices online</div><div class="value good">${onlineDevices}<span class="unit">/ ${(tick.devices||[]).length}</span></div><div class="sub">switches, APs &amp; gateway</div></div>
+      <div class="tile"><div class="label">Clients connected</div><div class="value">${clientsOnline}</div><div class="sub">currently online</div></div>
+      ${throughputTile}
+    `;
+  } else {
+    statsEl.innerHTML = `
+      <div class="tile" data-metric="cpu"><div class="label">Cellular CPU<span class="drill-hint">history ▾</span></div><div class="value ${cpuColor(gw.cpu)}">${gw.cpu ?? "—"}<span class="unit">%</span></div><div class="sub">${gw.name || ""} · ${gw.carrier || "no carrier"}</div></div>
+      <div class="tile" data-metric="mem"><div class="label">Cellular memory<span class="drill-hint">history ▾</span></div><div class="value ${memColor(gw.mem)}">${gw.mem ?? "—"}<span class="unit">%</span></div><div class="sub">uptime ${fmtUptime(gw.uptimeSec)}</div></div>
+      <div class="tile"><div class="label">Mode</div><div class="value" style="font-size:16px;">Failover backup</div><div class="sub">${gw.hasCarrier ? "carrier attached" : "no carrier"}</div></div>
+      <div class="tile"><div class="label">Status</div><div class="value ${gw.status==='online'?'good':'critical'}" style="font-size:16px;">${gw.status}</div><div class="sub">load ${gw.load1 ?? "—"} / ${gw.load5 ?? "—"} / ${gw.load15 ?? "—"}</div></div>
+      <div class="tile"><div class="label">Clients connected</div><div class="value">${clientsOnline}</div><div class="sub">site-wide, currently online</div></div>
+      ${throughputTile}
+    `;
+  }
+  statsEl.querySelectorAll(".tile[data-metric]").forEach(t => {
+    t.classList.toggle("tile-open", t.dataset.metric === openTile);
+    t.addEventListener("click", () => {
+      openTile = openTile === t.dataset.metric ? null : t.dataset.metric;
+      renderGatewayStats(tick);
+      renderTileDrill();
+    });
+  });
+  renderTileDrill();
+}
+
+// ============================================================
+// OVERVIEW — RTT / ping latency
+// The UDM reports latency for BOTH paths (wan1 = primary, wan3 = cellular);
+// the U5G device itself reports none. A standby failover link reports 0,
+// which the backend normalises to null so it shows as "standby" rather than
+// a bogus 0 ms.
+// ============================================================
+function renderRttSection(tick) {
+  const r = (tick.rtt || {})[selectedGateway];
+  const statsEl = document.getElementById("rtt-stats");
+  if (!r) {
+    statsEl.innerHTML = `<div class="tile"><div class="label">RTT</div><div class="value muted-cell" style="font-size:15px;">Not reported for this gateway</div></div>`;
+    return;
+  }
+  const isStandby = r.latencyMs == null;
+  const pct = v => v == null ? "—" : v.toFixed(1) + "%";
+  statsEl.innerHTML = `
+    <div class="tile">
+      <div class="label">Current RTT</div>
+      <div class="value" style="color:${latencyColor(r.latencyMs) || "var(--text-muted)"}">${r.latencyMs != null ? r.latencyMs : "—"}${r.latencyMs != null ? '<span class="unit">ms</span>' : ""}</div>
+      <div class="sub">${isStandby ? "standby — not measured" : (selectedGateway === "primary" ? "wired WAN" : "cellular WAN")}</div>
+    </div>
+    <div class="tile">
+      <div class="label">24h average</div>
+      <div class="value" style="color:${latencyColor(r.latencyAvg24h) || "var(--text-muted)"}">${r.latencyAvg24h != null ? r.latencyAvg24h : "—"}${r.latencyAvg24h != null ? '<span class="unit">ms</span>' : ""}</div>
+      <div class="sub">${r.latencyAvg24h != null ? "controller 24h mean" : "not reported"}</div>
+    </div>
+    <div class="tile">
+      <div class="label">Availability</div>
+      <div class="value ${r.availability >= 99 ? "good" : r.availability > 0 ? "warning" : ""}">${pct(r.availability)}</div>
+      <div class="sub">last 24 hours</div>
+    </div>`;
+
+  // Per-target monitors render as sparkline cards via loadRttMonitors(),
+  // which needs history rather than this tick's single snapshot.
+}
+
+// Compact axis-less sparkline for the per-target RTT cards. Deliberately
+// not renderLineChart -- that one reserves 46px for y-axis labels and draws
+// a grid, which is wasted weight at 44px tall.
+function sparklineSvg(values, colorVar) {
+  const vals = values.filter(v => v != null);
+  if (vals.length === 0) return null;
+  const w = 300, h = 44, pad = 3;
+  const max = Math.max(...vals), min = Math.min(...vals);
+  const span = (max - min) || 1;
+  const n = values.length;
+  const xAt = i => n <= 1 ? w / 2 : (i / (n - 1)) * w;
+  const yAt = v => h - pad - ((v - min) / span) * (h - pad * 2);
+
+  const pts = [];
+  values.forEach((v, i) => { if (v != null) pts.push([xAt(i), yAt(v)]); });
+  const line = pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+  const areaD = `M${pts[0][0].toFixed(1)},${h} L${pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" L")} L${pts[pts.length-1][0].toFixed(1)},${h} Z`;
+  return `
+    <svg class="rtt-spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+      <path class="chart-area" d="${areaD}" fill="var(${colorVar})"/>
+      <polyline class="chart-line" points="${line}" stroke="var(${colorVar})" stroke-width="1.5"/>
+    </svg>`;
+}
+
+async function loadRttMonitors() {
+  const range = document.querySelector("#wanRangeSeg .seg-btn2.active").dataset.range;
+  const gw = selectedGateway;
+  const res = await fetch(`/api/history/rtt?gateway=${gw}&range=${range}`);
+  const targets = await res.json();
+  // A slow response can land after the user has switched gateway/range.
+  if (selectedGateway !== gw) return;
+  const el = document.getElementById("rtt-monitors");
+  if (targets.length === 0) {
+    el.innerHTML = `<p class="muted-cell" style="font-size:12px;">No per-target monitors recorded yet for this path.</p>`;
+    return;
+  }
+  const fmt = v => v == null ? "—" : (v < 10 ? v.toFixed(1) : Math.round(v));
+  el.innerHTML = `
+    <p class="muted-cell" style="font-size:12px; margin:14px 0 0;">
+      Per-target monitors — the controller reports a rolling average per target, not individual pings,
+      sampled once a minute.
+    </p>
+    <div class="rtt-grid">
+      ${targets.map(t => {
+        const color = t.type === "icmp" ? "--slot-1" : "--slot-4";
+        const spark = sparklineSvg(t.points.map(p => p.latencyMs), color);
+        return `
+          <div class="rtt-card">
+            <div class="rtt-card-head">
+              <span class="rtt-card-title"><span class="rtt-proto">${(t.type || "").toUpperCase()}</span> — ${t.target}</span>
+              <span class="rtt-card-now" style="color:${latencyColor(t.latest) || "var(--text-muted)"}">${t.latest != null ? fmt(t.latest) + " ms" : "—"}</span>
+            </div>
+            ${spark || `<div class="rtt-empty">No samples in this range yet</div>`}
+            <div class="rtt-card-foot">min ${fmt(t.min)} · avg ${fmt(t.avg)} · max ${fmt(t.max)} ms · avail ${t.availability != null ? t.availability.toFixed(1) + "%" : "—"}</div>
+          </div>`;
+      }).join("")}
+    </div>`;
+}
+
+function renderRttChart() {
+  const range = document.querySelector("#wanRangeSeg .seg-btn2.active").dataset.range;
+  const rangeLabel = { "24h": "24 hours", "7d": "7 days", "14d": "14 days", "30d": "30 days" }[range];
+  document.getElementById("rtt-chart-title").textContent =
+    `Round-trip time — ${selectedGateway === "primary" ? "Primary WAN" : "Cellular failover"}, last ${rangeLabel}`;
+  renderLineChart(document.getElementById("rtt-chart-wrap"), {
+    series: [{ key: "rtt", name: "RTT", color: "--slot-7", data: lastGwHistory.map(r => r.latencyMs) }],
+    xLabels: lastGwHistory.map(r => bucketLabel(r.t, range)),
+    xValues: lastGwHistory.map(r => bucketTime(r.t)),
+    yFormat: v => v.toFixed(1) + " ms",
+    yFormatShort: v => Math.round(v),
+    height: 180,
+  });
+}
+
+function renderTileDrill() {
+  const area = document.getElementById("tile-drill-area");
+  if (!openTile || lastGwHistory.length === 0) { area.innerHTML = ""; return; }
+  const metric = TILE_METRICS[openTile];
+  const legend = metric.series.length > 1
+    ? `<div class="legend" style="margin-bottom:8px;">${metric.series.map(s => `<span class="legend-item"><span class="legend-swatch" style="background:var(${s.color})"></span>${s.name}</span>`).join("")}</div>`
+    : "";
+  area.innerHTML = `<div class="tile-drill"><div class="drill-title">${metric.label} — recent history</div>${legend}<div class="chart-wrap" id="tile-drill-chart"></div></div>`;
+  const range = document.querySelector("#wanRangeSeg .seg-btn2.active").dataset.range;
+  renderLineChart(document.getElementById("tile-drill-chart"), {
+    series: metric.series.map(s => ({ key: s.key, name: s.name, color: s.color, data: lastGwHistory.map(s.get) })),
+    xLabels: lastGwHistory.map(r => bucketLabel(r.t, range)),
+    xValues: lastGwHistory.map(r => bucketTime(r.t)),
+    yFormat: v => v.toFixed(1) + (metric.unit ? " " + metric.unit : ""),
+    height: 160,
+  });
+}
+
+function deviceIcon(cat) {
+  const icons = {
+    gateway: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="10" rx="2"/><circle cx="7" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="11" cy="12" r="1" fill="currentColor" stroke="none"/></svg>`,
+    cellular_gateway: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20h.01M7 20v-4M12 20v-8M17 20V8M22 20V4"/></svg>`,
+    switch: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10v4M10 10v4M14 10v4M18 10v4"/></svg>`,
+    ap: wifiIcon,
+    other: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/></svg>`,
+  };
+  return icons[cat] || icons.other;
+}
+const CAT_LABEL = { gateway: "Gateway", cellular_gateway: "Cellular", switch: "Switch", ap: "AP", other: "Other" };
+function safeMacId(mac) { return (mac || "").replace(/[^a-zA-Z0-9]/g, "_"); }
+
+// ============================================================
+// Devices table -- sortable + click-to-drill-down (port stats +
+// bandwidth history). Mirrors the AP-radios click-to-drill pattern.
+// ============================================================
+const DEV_ORDER = { gateway: 0, cellular_gateway: 1, switch: 2, ap: 3, other: 4 };
+let devState = { sortKey: "category", sortDir: 1 };
+let openDeviceRow = null; // device mac
+const deviceDrillCache = {}; // "mac:range" -> rows
+const deviceDrillInFlight = new Set();
+let deviceDrillRange = "24h";
+let lastDevices = [];
+const openPortRows = new Set(); // "mac|idx" ("|" not ":" -- macs contain colons); multiple can be open at once
+const portDrillCache = {}; // "mac|idx:range" -> rows
+const portUsageCache = {}; // device mac -> { portIdx: {rxBytes, txBytes} }
+const portUsageInFlight = new Set();
+const portDrillInFlight = new Set();
+
+function renderDeviceTable(devices) {
+  if (!devices) return;
+  lastDevices = devices;
+  document.getElementById("ov-device-count").textContent = devices.length;
+  const rows = devices.slice().sort((a, b) => {
+    let av, bv;
+    if (devState.sortKey === "category") {
+      const cmp = (DEV_ORDER[a.category] ?? 9) - (DEV_ORDER[b.category] ?? 9);
+      if (cmp) return cmp * devState.sortDir;
+      av = bv = null; // fall through to name tiebreak below
+    } else {
+      av = a[devState.sortKey]; bv = b[devState.sortKey];
+    }
+    if (av == null && bv == null) return (a.name||"").localeCompare(b.name||"");
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    if (typeof av === "string") { av = av.toLowerCase(); bv = String(bv).toLowerCase(); }
+    if (av < bv) return -1 * devState.sortDir;
+    if (av > bv) return 1 * devState.sortDir;
+    return (a.name||"").localeCompare(b.name||"");
+  });
+  document.getElementById("ov-device-tbody").innerHTML = rows.map(d => {
+    let html = `
+    <tr class="clickable" data-mac="${d.mac}">
+      <td><span class="conn">${deviceIcon(d.category)} ${CAT_LABEL[d.category] || d.category}</span></td>
+      <td class="name-cell">${d.name || "—"}</td>
+      <td class="muted-cell">${d.model || "—"}</td>
+      <td><span class="conn"><span class="status-dot ${d.status}"></span>${d.status[0].toUpperCase()+d.status.slice(1)}</span></td>
+      <td class="mono muted-cell">${fmtUptime(d.uptimeSec)}</td>
+      <td class="mono muted-cell">${d.ip || "—"}</td>
+      <td class="muted-cell">${d.parentMac ? `<span class="device-link" data-jump-mac="${d.parentMac}" style="cursor:pointer; text-decoration:underline dotted;">${d.parent || d.parentMac}</span>` : (d.parent || "—")}</td>
+      <td class="mono">${fmtBits(d.rxBps)}</td>
+      <td class="mono">${fmtBits(d.txBps)}</td>
+    </tr>`;
+    if (openDeviceRow === d.mac) {
+      const safeId = safeMacId(d.mac);
+      html += `
+      <tr class="vlan-detail"><td colspan="9"><div class="drill-inner">
+        <div class="drill-title">Port stats <span class="muted-cell" style="font-size:11px; font-weight:500;">(click a port for its history)</span></div>
+        ${renderPortsTable(d.mac, d.ports)}
+        <div class="drill-title" style="margin-top:14px;">Bandwidth history</div>
+        <div class="seg" id="device-range-${safeId}" style="margin-bottom:10px;">
+          <button class="seg-btn2${deviceDrillRange==='24h'?' active':''}" data-range="24h">24h</button>
+          <button class="seg-btn2${deviceDrillRange==='7d'?' active':''}" data-range="7d">7 days</button>
+          <button class="seg-btn2${deviceDrillRange==='14d'?' active':''}" data-range="14d">14 days</button>
+          <button class="seg-btn2${deviceDrillRange==='30d'?' active':''}" data-range="30d">30 days</button>
+        </div>
+        <div class="chart-wrap" id="device-drill-chart-${safeId}">Loading…</div>
+      </div></td></tr>`;
+    }
+    return html;
+  }).join("");
+
+  document.querySelectorAll("#ov-device-tbody tr.clickable[data-mac]").forEach(tr => {
+    tr.addEventListener("click", e => {
+      if (e.target.closest(".device-link")) return;
+      const mac = tr.dataset.mac;
+      openDeviceRow = openDeviceRow === mac ? null : mac;
+      renderDeviceTable(devices);
+    });
+  });
+  document.querySelectorAll("#ov-device-tbody .device-link").forEach(el => {
+    el.addEventListener("click", e => { e.stopPropagation(); jumpToDevice(el.dataset.jumpMac); });
+  });
+
+  if (openDeviceRow) {
+    const dev = devices.find(d => d.mac === openDeviceRow);
+    if (dev) {
+      const rangeSeg = document.getElementById(`device-range-${safeMacId(openDeviceRow)}`);
+      if (rangeSeg) rangeSeg.addEventListener("click", e => {
+        const btn = e.target.closest(".seg-btn2");
+        if (!btn) return;
+        deviceDrillRange = btn.dataset.range;
+        renderDeviceTable(lastDevices);
+      });
+      const cacheKey = openDeviceRow + ":" + deviceDrillRange;
+      if (deviceDrillCache[cacheKey]) drawDeviceDrillChart(openDeviceRow, deviceDrillCache[cacheKey]);
+      else if (!deviceDrillInFlight.has(cacheKey)) loadDeviceDrill(openDeviceRow, dev.category);
+      if (dev.ports && dev.ports.length > 0 && !portUsageCache[openDeviceRow] && !portUsageInFlight.has(openDeviceRow)) {
+        loadPortUsage(openDeviceRow);
+      }
+    }
+  }
+
+  document.querySelectorAll("#ov-device-tbody tr.clickable[data-port-key]").forEach(tr => {
+    tr.addEventListener("click", e => {
+      e.stopPropagation();
+      const key = tr.dataset.portKey;
+      if (openPortRows.has(key)) openPortRows.delete(key); else openPortRows.add(key);
+      renderDeviceTable(lastDevices);
+    });
+  });
+  openPortRows.forEach(key => {
+    const chartEl = document.getElementById(`port-drill-chart-${safeMacId(key)}`);
+    if (chartEl) {
+      const [pMac, pIdx] = key.split("|");
+      const cacheKey = key + ":" + deviceDrillRange;
+      if (portDrillCache[cacheKey]) drawPortDrillChart(key, portDrillCache[cacheKey]);
+      else if (!portDrillInFlight.has(cacheKey)) loadPortDrill(pMac, pIdx);
+    }
+  });
+}
+
+function setupDeviceTableSort() {
+  document.querySelectorAll("#ov-device-thead th[data-key]").forEach(th => {
+    th.addEventListener("click", () => {
+      const key = th.dataset.key;
+      if (devState.sortKey === key) devState.sortDir *= -1;
+      else { devState.sortKey = key; devState.sortDir = ["uptimeSec","rxBps","txBps"].includes(key) ? -1 : 1; }
+      document.querySelectorAll("#ov-device-thead th[data-key]").forEach(t => {
+        const arrow = t.querySelector(".arrow");
+        if (arrow) arrow.textContent = t.dataset.key === devState.sortKey ? (devState.sortDir === 1 ? "↑" : "↓") : "↕";
+      });
+      renderDeviceTable(lastDevices);
+    });
+  });
+}
+
+function renderPortsTable(mac, ports) {
+  if (!ports || ports.length === 0) {
+    return `<div class="muted-cell" style="font-size:12px;">No port data for this device.</div>`;
+  }
+  const usage = portUsageCache[mac]; // may be undefined until the async fetch resolves
+  const rowsHtml = ports.map(p => {
+    const portKey = `${mac}|${p.idx}`;
+    const u = usage ? usage[p.idx] : null;
+    const usageCell = u
+      ? `↓ ${fmtBytes(u.rxBytes)} <span class="muted-cell">·</span> ↑ ${fmtBytes(u.txBytes)}`
+      : `<span class="muted-cell">${usage ? "—" : "loading…"}</span>`;
+    let row = `
+        <tr class="clickable" data-port-key="${portKey}">
+          <td class="mono">${p.idx ?? "—"}${p.isUplink ? ' <span class="muted-cell" style="font-size:10.5px;">(uplink)</span>' : ""}</td>
+          <td>${p.name || "—"}</td>
+          <td><span class="conn"><span class="status-dot ${p.up ? "online" : "offline"}"></span>${p.up ? "Up" : "Down"}</span></td>
+          <td class="mono muted-cell">${p.speed ? p.speed + " Mbps" : "—"}</td>
+          <td class="mono muted-cell">${p.poe ? (p.poePower ? p.poePower.toFixed(1) + " W" : "On") : "—"}</td>
+          <td class="mono">${fmtBits(p.rxBps)}</td>
+          <td class="mono">${fmtBits(p.txBps)}</td>
+          <td class="mono">${usageCell}</td>
+          <td class="mono muted-cell">${fmtUptime(p.uptimeSec)}</td>
+        </tr>`;
+    if (openPortRows.has(portKey)) {
+      row += `<tr class="vlan-detail"><td colspan="9"><div class="drill-inner">
+        <div class="chart-wrap" id="port-drill-chart-${safeMacId(portKey)}">Loading…</div>
+      </div></td></tr>`;
+    }
+    return row;
+  }).join("");
+  return `
+    <table style="margin-bottom:4px;"><thead><tr>
+      <th>Port</th><th>Name</th><th>Status</th><th>Speed</th><th>PoE</th><th>Download</th><th>Upload</th><th>24h Usage</th><th>Uptime</th>
+    </tr></thead><tbody>${rowsHtml}</tbody></table>`;
+}
+
+async function loadPortUsage(mac) {
+  portUsageInFlight.add(mac);
+  try {
+    const res = await fetch(`/api/usage/ports/${encodeURIComponent(mac)}?range=24h`);
+    const rows = await res.json();
+    const byIdx = {};
+    rows.forEach(r => { byIdx[r.idx] = r; });
+    portUsageCache[mac] = byIdx;
+    if (openDeviceRow === mac) renderDeviceTable(lastDevices);
+  } finally {
+    portUsageInFlight.delete(mac);
+  }
+}
+
+async function loadPortDrill(mac, idx) {
+  const range = deviceDrillRange;
+  const portKey = `${mac}|${idx}`;
+  const cacheKey = portKey + ":" + range;
+  portDrillInFlight.add(cacheKey);
+  try {
+    const res = await fetch(`/api/history/port/${encodeURIComponent(mac)}/${encodeURIComponent(idx)}?range=${range}`);
+    const rows = await res.json();
+    portDrillCache[cacheKey] = rows;
+    if (openPortRows.has(portKey) && deviceDrillRange === range) drawPortDrillChart(portKey, rows);
+  } finally {
+    portDrillInFlight.delete(cacheKey);
+  }
+}
+
+function drawPortDrillChart(portKey, rows) {
+  const el = document.getElementById(`port-drill-chart-${safeMacId(portKey)}`);
+  if (!el) return;
+  renderLineChart(el, {
+    series: [
+      { key: "down", name: "Download", color: "--slot-1", data: rows.map(r => r.rxRateBps != null ? r.rxRateBps/1e6 : null) },
+      { key: "up", name: "Upload", color: "--slot-2", data: rows.map(r => r.txRateBps != null ? r.txRateBps/1e6 : null) },
+    ],
+    xLabels: rows.map(r => bucketLabel(r.t, deviceDrillRange)),
+    xValues: rows.map(r => bucketTime(r.t)),
+    yFormat: v => v.toFixed(2) + " Mbps",
+    height: 140,
+  });
+}
+
+async function loadDeviceDrill(mac, category) {
+  const range = deviceDrillRange;
+  const cacheKey = mac + ":" + range;
+  deviceDrillInFlight.add(cacheKey);
+  try {
+    const url = category === "gateway" ? `/api/history/wan?gateway=primary&range=${range}`
+              : category === "cellular_gateway" ? `/api/history/wan?gateway=cellular&range=${range}`
+              : `/api/history/device/${encodeURIComponent(mac)}?range=${range}`;
+    const res = await fetch(url);
+    const rows = await res.json();
+    deviceDrillCache[cacheKey] = rows;
+    if (openDeviceRow === mac && deviceDrillRange === range) drawDeviceDrillChart(mac, rows);
+  } finally {
+    deviceDrillInFlight.delete(cacheKey);
+  }
+}
+
+function drawDeviceDrillChart(mac, rows) {
+  const el = document.getElementById(`device-drill-chart-${safeMacId(mac)}`);
+  if (!el) return;
+  renderLineChart(el, {
+    series: [
+      { key: "down", name: "Download", color: "--slot-1", data: rows.map(r => r.rxRateBps != null ? r.rxRateBps/1e6 : null) },
+      { key: "up", name: "Upload", color: "--slot-2", data: rows.map(r => r.txRateBps != null ? r.txRateBps/1e6 : null) },
+    ],
+    xLabels: rows.map(r => bucketLabel(r.t, deviceDrillRange)),
+    xValues: rows.map(r => bucketTime(r.t)),
+    yFormat: v => v.toFixed(1) + " Mbps",
+    height: 160,
+  });
+}
+
+// Cross-page navigation: jump to a device's row (from the Devices table's
+// own Parent-column links, or from a client's "attached device" link on
+// the Clients/VLAN-detail pages) and open its drilldown.
+function jumpToDevice(mac) {
+  if (!latestTick) { console.warn("jumpToDevice: no tick data yet"); return; }
+  const dev = latestTick.devices.find(d => d.mac.toLowerCase() === (mac||"").toLowerCase());
+  if (!dev) { console.warn("jumpToDevice: device not found", mac); return; }
+  document.querySelectorAll("#topNav .nav-btn").forEach(b => b.classList.toggle("active", b.dataset.page === "devices"));
+  document.querySelectorAll(".page").forEach(p => p.classList.toggle("active", p.id === "page-devices"));
+  openDeviceRow = dev.mac;
+  renderDeviceTable(latestTick.devices);
+  document.getElementById("page-devices").scrollIntoView({ behavior: "smooth", block: "start" });
+  loadDeviceDrill(dev.mac, dev.category);
+}
+
+async function loadWanChart() {
+  const range = document.querySelector("#wanRangeSeg .seg-btn2.active").dataset.range;
+  const rangeLabel = { "24h": "24 hours", "7d": "7 days", "14d": "14 days", "30d": "30 days" }[range];
+  document.getElementById("wan-chart-title").textContent =
+    `Download / upload throughput — ${selectedGateway === "primary" ? "Primary WAN" : "Cellular failover"}, last ${rangeLabel}`;
+  const res = await fetch(`/api/history/wan?gateway=${selectedGateway}&range=${range}`);
+  const rows = await res.json();
+  lastGwHistory = rows;
+  renderLineChart(document.getElementById("wan-chart-wrap"), {
+    series: [
+      { key: "down", name: "Download", color: "--slot-1", data: rows.map(r => r.rxRateBps != null ? r.rxRateBps/1e6 : null) },
+      { key: "up", name: "Upload", color: "--slot-2", data: rows.map(r => r.txRateBps != null ? r.txRateBps/1e6 : null) },
+    ],
+    xLabels: rows.map(r => bucketLabel(r.t, range)),
+    xValues: rows.map(r => bucketTime(r.t)),
+    yFormat: v => v.toFixed(1) + " Mbps",
+    yFormatShort: v => v >= 100 ? Math.round(v) : v.toFixed(0),
+  });
+  if (openTile) renderTileDrill();
+  renderRttChart();
+}
+
+async function loadWanUsage() {
+  const res = await fetch(`/api/usage/wan?gateway=${selectedGateway}`);
+  const data = await res.json();
+  const labels = { "24h": "Last 24 hours", "7d": "Last 7 days", "30d": "Last 30 days" };
+  document.getElementById("wan-usage-stats").innerHTML = Object.keys(labels).map(key => {
+    const u = data[key] || {};
+    return `
+      <div class="tile">
+        <div class="label">${labels[key]}</div>
+        <div class="value" style="font-size:16px; line-height:1.5;">↓ ${fmtBytes(u.rxBytes)}<br>↑ ${fmtBytes(u.txBytes)}</div>
+      </div>`;
+  }).join("");
+}
+document.getElementById("wanRangeSeg").addEventListener("click", e => {
+  const btn = e.target.closest(".seg-btn2");
+  if (!btn) return;
+  document.querySelectorAll("#wanRangeSeg .seg-btn2").forEach(b => b.classList.toggle("active", b === btn));
+  loadWanChart();
+  loadRttMonitors();
+});
+
+async function loadSpeedtest() {
+  const res = await fetch(`/api/history/speedtest?gateway=${selectedGateway}`);
+  const rows = await res.json();
+  renderLineChart(document.getElementById("speed-chart-wrap"), {
+    series: [
+      { key: "down", name: "Download", color: "--slot-1", data: rows.map(r => r.down) },
+      { key: "up", name: "Upload", color: "--slot-2", data: rows.map(r => r.up) },
+    ],
+    xLabels: rows.map(r => new Date(r.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" })),
+    xValues: rows.map(r => new Date(r.ts).getTime()),
+    yFormat: v => v.toFixed(0) + " Mbps", height: 180,
+  });
+  renderLineChart(document.getElementById("latency-chart-wrap"), {
+    series: [{ key: "lat", name: "Latency", color: "--slot-7", data: rows.map(r => r.lat) }],
+    xLabels: rows.map(r => new Date(r.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" })),
+    xValues: rows.map(r => new Date(r.ts).getTime()),
+    yFormat: v => v.toFixed(0) + " ms", height: 180,
+  });
+  const recent = rows.slice(-8).reverse();
+  document.getElementById("speed-tbody").innerHTML = recent.length === 0
+    ? `<tr class="empty-row"><td colspan="4">No speedtests recorded yet for this gateway.</td></tr>`
+    : recent.map(r => `
+      <tr>
+        <td class="muted-cell">${new Date(r.ts).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</td>
+        <td class="mono">${r.down?.toFixed(0) ?? "—"} Mbps</td>
+        <td class="mono">${r.up?.toFixed(0) ?? "—"} Mbps</td>
+        <td class="mono muted-cell">${r.lat?.toFixed(0) ?? "—"} ms</td>
+      </tr>
+    `).join("");
+}
+
+// ============================================================
+// WIFI — AP table (live) with band toggle + drill-down
+// ============================================================
+const BAND_LABEL = { ng: "2.4GHz", na: "5GHz", "6e": "6GHz" };
+const BAND_SLOT = { ng: "--slot-3", na: "--slot-1", "6e": "--slot-7" };
+let apBandFilter = "";
+let apApFilter = ""; // AP mac; keyed on mac not name so duplicate names can't collide
+let lastAps = [];
+let openApRow = null; // "mac|band"
+
+document.getElementById("apBandSeg").addEventListener("click", e => {
+  const btn = e.target.closest(".seg-btn2");
+  if (!btn) return;
+  apBandFilter = btn.dataset.band;
+  document.querySelectorAll("#apBandSeg .seg-btn2").forEach(b => b.classList.toggle("active", b === btn));
+  renderApTable(lastAps);
+});
+
+function renderApTable(aps) {
+  if (!aps) return;
+  lastAps = aps;
+  renderApChipFilter(document.getElementById("ap-apFilter"),
+    aps.map(r => ({ mac: r.mac, name: r.name })), apApFilter,
+    mac => { apApFilter = mac; renderApTable(lastAps); });
+
+  const totalAps = new Set(aps.map(r => r.mac)).size;
+  let rows = aps.slice().sort((a, b) => (a.name||"").localeCompare(b.name||"") || (a.band||"").localeCompare(b.band||""));
+  if (apBandFilter) rows = rows.filter(r => r.band === apBandFilter);
+  if (apApFilter) rows = rows.filter(r => r.mac === apApFilter);
+  const shownAps = new Set(rows.map(r => r.mac)).size;
+  document.getElementById("wifi-ap-count").textContent =
+    (apApFilter || apBandFilter) ? `${shownAps} of ${totalAps} APs` : `${totalAps} APs`;
+  const tbody = document.getElementById("ap-tbody");
+  if (rows.length === 0) {
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="8">No radios match this filter.</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows.map(r => {
+    const rowKey = `${r.mac}|${r.band}`;
+    let html = `
+      <tr class="clickable" data-key="${rowKey}" data-mac="${r.mac}" data-band="${r.band}">
+        <td><div class="name-cell"><span class="status-dot ${r.status}" style="margin-right:6px;"></span>${r.name || r.mac}</div></td>
+        <td><span class="badge" style="background:color-mix(in srgb, var(${BAND_SLOT[r.band]||'--slot-1'}) 16%, transparent); color:var(${BAND_SLOT[r.band]||'--slot-1'})"><span class="dot" style="background:var(${BAND_SLOT[r.band]||'--slot-1'})"></span>${BAND_LABEL[r.band] || r.band}</span></td>
+        <td class="mono">${r.channel ?? "—"}</td>
+        <td class="mono">${r.txPower ?? "—"} dBm</td>
+        <td><div class="util-bar"><div class="util-track"><div class="util-fill" style="width:${r.cuTotal||0}%; background:${utilColor(r.cuTotal||0)}"></div></div><span class="util-pct">${r.cuTotal ?? 0}%</span></div></td>
+        <td class="mono">${r.numSta ?? 0}</td>
+        <td>${retryColor(r.retryPct||0) ? `<span class="retry-warn" style="color:${retryColor(r.retryPct||0)}">${warnIcon}${r.retryPct}%</span>` : `<span class="mono muted-cell">${r.retryPct ?? 0}%</span>`}</td>
+        <td class="mono muted-cell">${fmtUptime(r.uptimeSec)}</td>
+      </tr>`;
+    if (openApRow === rowKey) {
+      html += `<tr class="vlan-detail"><td colspan="8"><div class="drill-inner" id="ap-drill-${rowKey.replace(/[^a-zA-Z0-9]/g,'_')}">Loading…</div></td></tr>`;
+    }
+    return html;
+  }).join("");
+  tbody.querySelectorAll("tr.clickable").forEach(tr => {
+    tr.addEventListener("click", () => {
+      const key = tr.dataset.key;
+      openApRow = openApRow === key ? null : key;
+      renderApTable(lastAps);
+      if (openApRow) loadApDrill(tr.dataset.mac, tr.dataset.band, key);
+    });
+  });
+  // Live ticks rebuild this table every ~5s; if a row is expanded, redraw
+  // its chart from cache immediately rather than showing "Loading…" again.
+  if (openApRow && apDrillCache[openApRow]) {
+    drawApDrillChart(openApRow, apDrillCache[openApRow]);
+  }
+}
+
+let wcSearch = "";
+let wcApFilter = ""; // AP mac
+let lastWirelessClients = [];
+
+function renderWirelessClientsTable(clients) {
+  if (clients) lastWirelessClients = clients;
+  const all = lastWirelessClients.filter(c => c.connType === "wireless")
+    .sort((a, b) => (a.hostname || "").localeCompare(b.hostname || ""));
+
+  renderApChipFilter(document.getElementById("wc-apFilter"),
+    all.map(c => ({ mac: c.parentMac, name: c.parentName })), wcApFilter,
+    mac => { wcApFilter = mac; renderWirelessClientsTable(); });
+
+  // Searches the identifying fields too (IP/MAC/SSID), not just the visible
+  // columns -- pasting a MAC or IP is a common way to find a specific client.
+  const q = wcSearch.trim().toLowerCase();
+  let rows = all;
+  if (wcApFilter) rows = rows.filter(c => c.parentMac === wcApFilter);
+  if (q) rows = rows.filter(c => `${c.hostname||""} ${c.mac||""} ${c.ip||""} ${c.network||""} ${c.parentName||""} ${c.essid||""}`.toLowerCase().includes(q));
+  const filtered = q || wcApFilter;
+  document.getElementById("wc-count").textContent = filtered ? `${rows.length} of ${all.length}` : all.length;
+  const tbody = document.getElementById("wc-tbody");
+  if (rows.length === 0) {
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="9">${
+      all.length === 0 ? "No wireless clients online." : "No wireless clients match this filter."
+    }</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows.map(c => `
+    <tr>
+      <td>${c.hostname ? `<span class="name-cell">${c.hostname}</span>` : '<span class="muted-cell">unnamed</span>'}</td>
+      <td>${clBadge(c.network)}</td>
+      <td class="muted-cell">${c.parentName || c.parentMac || "—"}</td>
+      <td><span class="badge" style="background:color-mix(in srgb, var(${BAND_SLOT[c.band]||'--slot-1'}) 16%, transparent); color:var(${BAND_SLOT[c.band]||'--slot-1'})"><span class="dot" style="background:var(${BAND_SLOT[c.band]||'--slot-1'})"></span>${BAND_LABEL[c.band] || c.band || "—"}</span></td>
+      <td class="mono">${c.channel ?? "—"}</td>
+      <td class="mono">${fmtBits(c.txRate)}</td>
+      <td class="mono">${fmtBits(c.rxRate)}</td>
+      <td class="mono" style="color:${signalColor(c.signal)}">${c.signal != null ? c.signal + " dBm" : "—"}</td>
+      <td class="mono muted-cell">${fmtUptime(c.uptimeSec)}</td>
+    </tr>`).join("");
+}
+
+const apDrillCache = {}; // rowKey -> rows, so live tick re-renders of the AP
+                          // table can redraw an open drill-down instantly
+                          // instead of flashing back to "Loading…" every 5s.
+
+function drawApDrillChart(rowKey, rows) {
+  const safeId = rowKey.replace(/[^a-zA-Z0-9]/g, '_');
+  const el = document.getElementById(`ap-drill-${safeId}`);
+  if (!el) return;
+  el.innerHTML = `<div class="drill-title">Utilization &amp; connected clients — last 24 hours</div><div class="chart-wrap" id="ap-drill-chart-${safeId}"></div>`;
+  renderLineChart(document.getElementById(`ap-drill-chart-${safeId}`), {
+    series: [
+      { key: "util", name: "Utilization %", color: "--slot-1", data: rows.map(r => r.cuTotal) },
+      { key: "sta", name: "Clients", color: "--slot-5", data: rows.map(r => r.numSta) },
+    ],
+    xLabels: rows.map(r => bucketLabel(r.t, "24h")),
+    xValues: rows.map(r => bucketTime(r.t)),
+    yFormat: v => v.toFixed(1),
+    height: 160,
+  });
+}
+
+async function loadApDrill(mac, band, rowKey) {
+  const res = await fetch(`/api/history/ap/${encodeURIComponent(mac)}/${encodeURIComponent(band)}?range=24h`);
+  const rows = await res.json();
+  apDrillCache[rowKey] = rows;
+  drawApDrillChart(rowKey, rows);
+}
+
+// ============================================================
+// WIFI — VLAN section with click-to-drill-down
+// ============================================================
+let vlanSummary = {}; // network -> {total, online}
+let expandedVlan = null;
+
+function renderVlanSummary(vlanCounts) {
+  if (!vlanCounts) return;
+  Object.keys(vlanCounts).forEach(net => {
+    vlanSummary[net] = vlanSummary[net] || { total: 0 };
+    vlanSummary[net].online = vlanCounts[net];
+  });
+  drawVlanTable();
+}
+
+async function loadVlanSummary() {
+  const res = await fetch("/api/vlans");
+  const rows = await res.json();
+  rows.forEach(r => { vlanSummary[r.network] = { total: r.total, online: r.online }; });
+  drawVlanTable();
+}
+
+async function loadVlanChart() {
+  const nets = Object.keys(NETWORKS);
+  const results = await Promise.all(nets.map(net =>
+    fetch(`/api/history/vlan/${encodeURIComponent(net)}?range=24h`).then(r => r.json()).catch(() => [])
+  ));
+  // Different VLANs can have gaps (a network with zero online clients at a
+  // given tick produces no row at all), so align every series to the union
+  // of timestamps seen across all of them rather than zipping by index.
+  const timelineSet = new Set();
+  results.forEach(rows => rows.forEach(r => timelineSet.add(r.t)));
+  const timeline = Array.from(timelineSet).sort();
+  if (timeline.length === 0) {
+    document.getElementById("vlan-chart-wrap").innerHTML = `<div class="chart-empty">No VLAN history yet — check back once the live server has been running a little longer.</div>`;
+    document.getElementById("vlan-chart-legend").innerHTML = "";
+    return;
+  }
+  const series = nets.map((net, i) => {
+    const byTime = Object.fromEntries(results[i].map(r => [r.t, r.count]));
+    const meta = NETWORKS[net];
+    return { key: net, name: meta.label, color: meta.slot, data: timeline.map(t => byTime[t] ?? null) };
+  }).filter(s => s.data.some(v => v != null)); // drop VLANs with no data at all in this window
+
+  document.getElementById("vlan-chart-legend").innerHTML = series.map(s =>
+    `<span class="legend-item"><span class="legend-swatch" style="background:var(${s.color})"></span>${s.name}</span>`
+  ).join("");
+  renderLineChart(document.getElementById("vlan-chart-wrap"), {
+    series,
+    xLabels: timeline.map(t => bucketLabel(t, "24h")),
+    xValues: timeline.map(t => bucketTime(t)),
+    yFormat: v => Math.round(v) + " clients",
+    yFormatShort: v => Math.round(v),
+  });
+}
+
+function drawVlanTable() {
+  document.getElementById("vlan-count").textContent = Object.keys(vlanSummary).length;
+  const nets = Object.keys(vlanSummary).sort();
+  document.getElementById("vlan-tbody").innerHTML = nets.map(net => {
+    const meta = networkMeta(net);
+    const s = vlanSummary[net];
+    const badgeHtml = meta
+      ? `<span class="badge" style="background:color-mix(in srgb, var(${meta.slot}) 16%, transparent); color:var(${meta.slot})"><span class="dot" style="background:var(${meta.slot})"></span>${net}</span>`
+      : net;
+    const chevron = expandedVlan === net ? "▾" : "▸";
+    let rowsHtml = `
+      <tr class="clickable" data-net="${net}">
+        <td style="width:20px; text-align:center; color:var(--text-muted);">${chevron}</td>
+        <td>${badgeHtml}</td>
+        <td class="mono">${s.online ?? 0} <span class="muted-cell">online</span> · ${s.total ?? "—"} <span class="muted-cell">known</span></td>
+      </tr>`;
+    if (expandedVlan === net) {
+      rowsHtml += `<tr class="vlan-detail"><td colspan="3"><div class="vlan-detail-inner" id="vlan-detail-${net}">Loading…</div></td></tr>`;
+    }
+    return rowsHtml;
+  }).join("");
+  document.querySelectorAll("#vlan-tbody tr.clickable").forEach(tr => {
+    tr.addEventListener("click", () => {
+      const net = tr.dataset.net;
+      expandedVlan = expandedVlan === net ? null : net;
+      drawVlanTable();
+      if (expandedVlan) loadVlanDetail(net);
+    });
+  });
+  // Live ticks rebuild this table every ~5s; redraw an expanded VLAN's
+  // detail from cache instead of flashing back to "Loading…" each time.
+  if (expandedVlan && vlanDetailCache[expandedVlan + ":" + vlanStatusMode]) {
+    const { hist, clients } = vlanDetailCache[expandedVlan + ":" + vlanStatusMode];
+    drawVlanDetail(expandedVlan, hist, clients, vlanStatusMode);
+  }
+}
+
+const vlanDetailCache = {}; // network -> {hist, clients}
+
+let vlanStatusMode = "online";
+
+async function loadVlanDetail(net) {
+  const status = vlanStatusMode;
+  const [histRes, clientsRes] = await Promise.all([
+    fetch(`/api/history/vlan/${encodeURIComponent(net)}?range=7d`),
+    fetch(`/api/clients/${encodeURIComponent(net)}?status=${status}`),
+  ]);
+  const hist = await histRes.json();
+  const clients = await clientsRes.json();
+  vlanDetailCache[net + ":" + status] = { hist, clients };
+  if (vlanStatusMode === status) drawVlanDetail(net, hist, clients, status);
+}
+
+function deviceLinkCell(mac, name) {
+  return mac
+    ? `<span class="device-link" data-jump-mac="${mac}" style="cursor:pointer; text-decoration:underline dotted;">${name || mac}</span>`
+    : '<span class="muted-cell">—</span>';
+}
+
+function drawVlanDetail(net, hist, clients, status) {
+  const el = document.getElementById(`vlan-detail-${net}`);
+  if (!el) return;
+  const listLabel = status === "online" ? "Currently connected" : "Known but offline";
+  const emptyLabel = status === "online"
+    ? "No clients currently online on this network."
+    : "No known offline clients recorded for this network.";
+  const rowsHtml = status === "online" ? clients.map(c => `
+        <tr>
+          <td class="name-cell">${c.hostname || '<span class="muted-cell">unnamed</span>'}</td>
+          <td class="mono">${c.ip || "—"}</td>
+          <td class="mac">${c.mac}</td>
+          <td class="muted-cell">${c.vendor || "—"}</td>
+          <td><span class="conn">${c.connType === "wired" ? wiredIcon + " Wired" : wifiIcon + " " + (c.essid || "Wireless") + (c.signal != null ? ` <span class="mono" style="color:${signalColor(c.signal)}">${c.signal} dBm</span>` : "")}</span></td>
+          <td>${deviceLinkCell(c.parentMac, c.parentName)}</td>
+          <td class="mono muted-cell">${fmtUptime(c.uptimeSec)}</td>
+        </tr>
+      `).join("") : clients.map(c => `
+        <tr>
+          <td class="name-cell">${c.hostname || '<span class="muted-cell">unnamed</span>'}</td>
+          <td class="mono">${c.ip || "—"}</td>
+          <td class="mac">${c.mac}</td>
+          <td class="muted-cell">${c.vendor || "—"}</td>
+          <td><span class="conn">${c.connType === "wired" ? wiredIcon + " Wired" : wifiIcon + " Wireless"} <span class="muted-cell">· ${clRelativeTime(c.lastSeen)}</span></span></td>
+          <td>${deviceLinkCell(c.parentMac, c.parentName)}</td>
+        </tr>
+      `).join("");
+  const headCols = status === "online"
+    ? `<th>Hostname</th><th>IP</th><th>MAC</th><th>Vendor</th><th>Connection</th><th>Device</th><th>Uptime</th>`
+    : `<th>Hostname</th><th>IP (last known)</th><th>MAC</th><th>Vendor</th><th>Last seen</th><th>Device</th>`;
+  el.innerHTML = `
+    <div style="font-size:12px; font-weight:650; margin-bottom:8px; color:var(--text-secondary);">Connected clients over the last 7 days</div>
+    <div class="chart-wrap" id="vlan-hist-${net}" style="margin-bottom:16px;"></div>
+    <div style="font-size:12px; font-weight:650; margin-bottom:8px; color:var(--text-secondary);">${listLabel} (${clients.length})</div>
+    ${clients.length === 0 ? `<div class="muted-cell" style="font-size:13px;">${emptyLabel}</div>` : `
+    <table><thead><tr>${headCols}</tr></thead>
+      <tbody>${rowsHtml}</tbody></table>`}
+  `;
+  el.querySelectorAll(".device-link").forEach(e => {
+    e.addEventListener("click", ev => { ev.stopPropagation(); jumpToDevice(e.dataset.jumpMac); });
+  });
+  renderLineChart(document.getElementById(`vlan-hist-${net}`), {
+    series: [{ key: "count", name: "Clients online", color: networkMeta(net) ? networkMeta(net).slot : "--slot-1", data: hist.map(r => r.count) }],
+    xLabels: hist.map(r => bucketLabel(r.t, "7d")),
+    xValues: hist.map(r => bucketTime(r.t)),
+    yFormat: v => Math.round(v) + " clients",
+    yFormatShort: v => Math.round(v),
+    height: 160,
+  });
+}
+
+document.getElementById("vlanStatusSeg").addEventListener("click", e => {
+  const btn = e.target.closest(".seg-btn2");
+  if (!btn) return;
+  vlanStatusMode = btn.dataset.status;
+  document.querySelectorAll("#vlanStatusSeg .seg-btn2").forEach(b => b.classList.toggle("active", b === btn));
+  if (expandedVlan) loadVlanDetail(expandedVlan);
+});
+
+// ============================================================
+// WIFI — Neighbor SSIDs (hover popover + drill-down)
+// ============================================================
+let neighbors = [];
+let nbState = { search: "", band: "", ap: "" };
+let nbPage = 1;
+let expandedNeighbor = null;
+
+async function loadNeighbors() {
+  const res = await fetch("/api/neighbors");
+  neighbors = await res.json();
+  renderNeighbors();
+}
+
+// sightings are sorted strongest-signal-first by the backend, so [0] is the
+// closest AP -- same source the "Closest AP" column already displays.
+function nbClosestApMac(n) { return (n.sightings && n.sightings[0]) ? n.sightings[0].apMac : null; }
+
+function renderNeighbors() {
+  document.getElementById("nb-count").textContent = neighbors.length;
+  renderApChipFilter(document.getElementById("nb-apFilter"),
+    neighbors.map(n => ({ mac: nbClosestApMac(n), name: n.closestAp })), nbState.ap,
+    mac => { nbState.ap = mac; nbPage = 1; renderNeighbors(); });
+
+  let rows = neighbors.filter(n => {
+    if (nbState.band && n.band !== nbState.band) return false;
+    if (nbState.ap && nbClosestApMac(n) !== nbState.ap) return false;
+    if (nbState.search) {
+      const q = nbState.search.toLowerCase();
+      if (!`${n.ssid||""} ${n.vendor||""}`.toLowerCase().includes(q)) return false;
+    }
+    return true;
+  });
+  const tbody = document.getElementById("nb-tbody");
+  const totalMatched = rows.length;
+  const { pageRows, totalPages, clampedPage } = paginate(rows, nbPage);
+  nbPage = clampedPage;
+  if (pageRows.length === 0) {
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="6">No neighbors match this filter.</td></tr>`;
+    document.getElementById("nb-footer").textContent = "";
+    renderPaginationControls(document.getElementById("nb-pagination"), 1, 1, () => {});
+    return;
+  }
+  tbody.innerHTML = pageRows.map(n => {
+    const pct = Math.max(0, Math.min(100, (n.bestSignal + 95) / 65 * 100));
+    const extra = n.sightings.length - 1;
+    const closestCell = `
+      <div class="closest-wrap" data-bssid="${n.bssid}">
+        <span class="closest-badge">${n.closestAp}</span>
+        ${extra > 0 ? `<span class="more-pill">+${extra}</span>` : ""}
+      </div>`;
+    return `
+      <tr class="clickable" data-bssid="${n.bssid}">
+        <td><div class="util-bar"><div class="util-track"><div class="util-fill" style="width:${pct}%; background:${signalColor(n.bestSignal)}"></div></div><span class="util-pct mono" style="color:${signalColor(n.bestSignal)}">${n.bestSignal} dBm</span></div></td>
+        <td class="name-cell">${n.ssid || '<span class="fallback muted-cell">(hidden)</span>'}</td>
+        <td class="mono">${n.channel}</td>
+        <td class="muted-cell">${BAND_LABEL[n.band] || n.band}</td>
+        <td class="muted-cell">${n.vendor || "Unknown"}</td>
+        <td>${closestCell}</td>
+      </tr>
+      ${expandedNeighbor === n.bssid ? `<tr class="vlan-detail"><td colspan="6"><div class="drill-inner" id="nb-drill-${n.bssid.replace(/:/g,'')}">Loading…</div></td></tr>` : ""}
+    `;
+  }).join("");
+  const startIdx = totalMatched === 0 ? 0 : (nbPage-1)*PAGE_SIZE + 1;
+  const endIdx = Math.min(nbPage*PAGE_SIZE, totalMatched);
+  document.getElementById("nb-footer").textContent = `Showing ${startIdx}-${endIdx} of ${totalMatched} neighboring networks (${neighbors.length} total), sorted by strongest signal seen by any of our APs. Hover "+N" for per-AP signal; click a row for its 30-day signal history.`;
+  renderPaginationControls(document.getElementById("nb-pagination"), nbPage, totalPages, p => { nbPage = p; renderNeighbors(); });
+
+  tbody.querySelectorAll("tr.clickable").forEach(tr => {
+    tr.addEventListener("click", e => {
+      if (e.target.closest(".closest-wrap")) return; // don't drill down from the hover badge
+      const bssid = tr.dataset.bssid;
+      expandedNeighbor = expandedNeighbor === bssid ? null : bssid;
+      renderNeighbors();
+      if (expandedNeighbor) loadNeighborDrill(bssid);
+    });
+  });
+
+  // "+N" badge: hover shows the floating popover; clicking pins it open too,
+  // so it stays visible on touch devices or without holding a hover.
+  tbody.querySelectorAll(".closest-wrap").forEach(wrap => {
+    if (!wrap.querySelector(".more-pill")) return;
+    const n = neighbors.find(nb => nb.bssid === wrap.dataset.bssid);
+    wrap.addEventListener("mouseenter", () => showSightingsPopover(wrap, n));
+    wrap.addEventListener("mouseleave", () => { if (pinnedWrap !== wrap) hideSightingsPopover(); });
+    wrap.addEventListener("click", e => {
+      e.stopPropagation();
+      if (pinnedWrap === wrap) { pinnedWrap = null; hideSightingsPopover(); }
+      else { pinnedWrap = wrap; showSightingsPopover(wrap, n); }
+    });
+  });
+}
+
+// Floating popover lives at document level (position: fixed) so it always
+// renders above every other element on the page and is never clipped by a
+// table's overflow, or visually stuck overlapping an expanded row's chart
+// above/below it -- both of which happened when it was positioned relative
+// to its own row.
+let pinnedWrap = null;
+const sightingsPopoverEl = document.getElementById("sightingsPopover");
+function showSightingsPopover(wrap, n) {
+  if (!n) return;
+  sightingsPopoverEl.innerHTML = n.sightings.map((s, i) =>
+    `<div class="sp-row${i===0?' best':''}"><span>${s.apName}</span><span class="mono" style="color:${signalColor(s.signal)}">${s.signal} dBm</span></div>`
+  ).join("");
+  sightingsPopoverEl.classList.add("visible");
+  const anchor = wrap.getBoundingClientRect();
+  const popH = sightingsPopoverEl.offsetHeight, popW = sightingsPopoverEl.offsetWidth;
+  // Prefer opening below the anchor; flip above only if there's no room
+  // below (e.g. anchor near the bottom of the viewport).
+  const top = (anchor.bottom + 6 + popH <= window.innerHeight)
+    ? anchor.bottom + 6
+    : Math.max(4, anchor.top - 6 - popH);
+  const left = Math.min(window.innerWidth - popW - 4, anchor.left);
+  sightingsPopoverEl.style.top = top + "px";
+  sightingsPopoverEl.style.left = Math.max(4, left) + "px";
+}
+function hideSightingsPopover() { sightingsPopoverEl.classList.remove("visible"); }
+
+document.addEventListener("click", e => {
+  if (e.target.closest(".closest-wrap")) return;
+  pinnedWrap = null;
+  hideSightingsPopover();
+});
+
+async function loadNeighborDrill(bssid) {
+  const res = await fetch(`/api/history/neighbor/${encodeURIComponent(bssid)}?range=30d`);
+  const rows = await res.json();
+  const el = document.getElementById(`nb-drill-${bssid.replace(/:/g,'')}`);
+  if (!el) return;
+  el.innerHTML = `<div class="drill-title">Signal strength — last 30 days (strongest of any AP, per day)</div><div class="chart-wrap" id="nb-drill-chart-${bssid.replace(/:/g,'')}"></div>`;
+  renderLineChart(document.getElementById(`nb-drill-chart-${bssid.replace(/:/g,'')}`), {
+    series: [{ key: "signal", name: "Signal", color: "--slot-7", data: rows.map(r => r.signal) }],
+    xLabels: rows.map(r => bucketLabel(r.t, "30d")),
+    xValues: rows.map(r => bucketTime(r.t)),
+    yFormat: v => v.toFixed(0) + " dBm",
+    height: 160,
+  });
+}
+
+document.getElementById("wc-search").addEventListener("input", e => { wcSearch = e.target.value; renderWirelessClientsTable(); });
+document.getElementById("nb-search").addEventListener("input", e => { nbState.search = e.target.value; nbPage = 1; renderNeighbors(); });
+document.getElementById("nb-band-seg").addEventListener("click", e => {
+  const btn = e.target.closest(".seg-btn2");
+  if (!btn) return;
+  nbState.band = btn.dataset.band;
+  document.querySelectorAll("#nb-band-seg .seg-btn2").forEach(b => b.classList.toggle("active", b === btn));
+  nbPage = 1;
+  renderNeighbors();
+});
+
+// ============================================================
+// CLIENTS page (live via WS: tick.onlineClients + offline-update)
+// ============================================================
+let ONLINE_DATA = [], OFFLINE_DATA = [];
+let clState = { view: "online", search: "", net: "", conn: "", sortKey: "network", sortDir: 1 };
+let clPage = 1;
+
+// The backend resolves every client's network against the controller's real
+// subnets, so this is only a last-resort label when that field is absent.
+function networkFor(ip) { return "other"; }
+
+async function loadClients() {
+  const [onRes, offRes] = await Promise.all([fetch("/api/clients/online"), fetch("/api/clients/offline")]);
+  const on = await onRes.json(), off = await offRes.json();
+  onOnlineUpdate(on.map(c => ({ mac: c.mac, hostname: c.hostname, ip: c.ip, network: c.network, connType: c.connType, essid: c.essid, signal: c.signal, vendor: c.vendor, parentMac: c.parentMac, parentName: c.parentName, uptimeSec: c.uptimeSec })), true);
+  onOfflineUpdate(off, true);
+  clRenderNetFilter(); clRender(); clRenderStats();
+}
+
+function onOnlineUpdate(clients, skipRender) {
+  if (!clients) return;
+  ONLINE_DATA = clients.map(c => ({ mac: c.mac, ip: c.ip, display: c.hostname, wired: c.connType === "wired", ssid: c.essid, signal: c.signal, network: c.network || networkFor(c.ip), vendor: c.vendor, parentMac: c.parentMac, parentName: c.parentName, uptimeSec: c.uptimeSec }));
+  updateClientTabCounts();
+  if (!skipRender && clState.view === "online") { clRenderNetFilter(); clRender(); clRenderStats(); }
+}
+function onOfflineUpdate(offline, skipRender) {
+  if (!offline) return;
+  OFFLINE_DATA = offline.map(c => ({ mac: c.mac, ip: c.ip, display: c.hostname, wired: c.connType === "wired", lastSeen: c.lastSeen, network: c.network || networkFor(c.ip), vendor: c.vendor, parentMac: c.parentMac, parentName: c.parentName }));
+  updateClientTabCounts();
+  if (!skipRender && clState.view === "offline") { clRenderNetFilter(); clRender(); clRenderStats(); }
+}
+
+const clTabsEl = document.getElementById("cl-tabs");
+function updateClientTabCounts() {
+  // Pure DOM/count refresh -- callers are responsible for triggering renders.
+  clTabsEl.innerHTML = "";
+  [{ key: "online", label: "Online now", count: ONLINE_DATA.length }, { key: "offline", label: "Offline / history", count: OFFLINE_DATA.length }].forEach(t => {
+    const btn = document.createElement("button");
+    btn.className = "nav-btn" + (t.key === clState.view ? " active" : "");
+    btn.dataset.view = t.key;
+    btn.innerHTML = `${t.label} <span class="count-pill">${t.count}</span>`;
+    clTabsEl.appendChild(btn);
+  });
+}
+clTabsEl.addEventListener("click", e => {
+  const btn = e.target.closest(".nav-btn");
+  if (!btn) return;
+  clState.view = btn.dataset.view;
+  clState.sortKey = clState.view === "online" ? "network" : "lastSeen";
+  clState.sortDir = clState.view === "online" ? 1 : -1;
+  clPage = 1;
+  updateClientTabCounts(); clBuildHead(); clRenderStats(); clRenderNetFilter(); clRender();
+});
+
+const clConnFilterEl = document.getElementById("cl-connFilter");
+[{ key: "", label: "All", icon: "" }, { key: "wired", label: "Wired", icon: wiredIcon }, { key: "wireless", label: "Wi-Fi", icon: wifiIcon }].forEach(opt => {
+  const btn = document.createElement("button");
+  btn.className = "seg-btn2" + (opt.key === "" ? " active" : "");
+  btn.dataset.conn = opt.key;
+  btn.innerHTML = `${opt.icon}${opt.label}`;
+  clConnFilterEl.appendChild(btn);
+});
+clConnFilterEl.addEventListener("click", e => {
+  const btn = e.target.closest(".seg-btn2");
+  if (!btn) return;
+  clState.conn = btn.dataset.conn;
+  clConnFilterEl.querySelectorAll(".seg-btn2").forEach(b => b.classList.toggle("active", b === btn));
+  clPage = 1;
+  clRender();
+});
+
+const clNetFilterEl = document.getElementById("cl-netFilter");
+function clRenderNetFilter() {
+  clNetFilterEl.innerHTML = "";
+  const allBtn = document.createElement("button");
+  allBtn.className = "chip-btn" + (clState.net === "" ? " active" : "");
+  allBtn.textContent = "All networks"; allBtn.dataset.net = "";
+  clNetFilterEl.appendChild(allBtn);
+  const data = clState.view === "online" ? ONLINE_DATA : OFFLINE_DATA;
+  const present = [...new Set(data.map(d => d.network))].filter(n => NETWORKS[n]);
+  present.forEach(key => {
+    const meta = NETWORKS[key];
+    const btn = document.createElement("button");
+    btn.className = "chip-btn" + (clState.net === key ? " active" : "");
+    btn.dataset.net = key;
+    btn.innerHTML = `<span class="chip-dot" style="background:var(${meta.slot})"></span>${meta.label}`;
+    clNetFilterEl.appendChild(btn);
+  });
+}
+clNetFilterEl.addEventListener("click", e => {
+  const btn = e.target.closest(".chip-btn");
+  if (!btn) return;
+  clState.net = btn.dataset.net;
+  clPage = 1;
+  clRenderNetFilter(); clRender();
+});
+
+const clTheadEl = document.getElementById("cl-thead");
+function clBuildHead() {
+  const cols = clState.view === "online"
+    ? [["ip","IP address"],["display","Hostname"],["mac","MAC"],["vendor","Vendor"],["network","Network"],["conn","Connection"],["parent","Device"],["uptimeSec","Uptime"]]
+    : [["ip","IP address (last known)"],["display","Hostname"],["mac","MAC"],["vendor","Vendor"],["network","Network"],["conn","Type"],["lastSeen","Last connected"],["parent","Device"]];
+  clTheadEl.innerHTML = `<tr>${cols.map(([key, label]) => `<th data-key="${key}" style="cursor:pointer;">${label}<span class="arrow" style="opacity:.4; margin-left:3px; font-size:10px;">↕</span></th>`).join("")}</tr>`;
+  clTheadEl.querySelectorAll("th").forEach(th => {
+    th.addEventListener("click", () => {
+      if (clState.sortKey === th.dataset.key) clState.sortDir *= -1;
+      else { clState.sortKey = th.dataset.key; clState.sortDir = th.dataset.key === "lastSeen" ? -1 : 1; }
+      clPage = 1;
+      clRender();
+    });
+  });
+}
+
+function clBadge(net) {
+  const meta = NETWORKS[net];
+  if (!meta) return `<span class="badge na">—</span>`;
+  return `<span class="badge" style="background:color-mix(in srgb, var(${meta.slot}) 16%, transparent); color:var(${meta.slot})"><span class="dot" style="background:var(${meta.slot})"></span>${meta.label}</span>`;
+}
+function clRelativeTime(iso) {
+  if (!iso) return "—";
+  const diffMs = Math.max(0, Date.now() - new Date(iso).getTime());
+  const min = Math.floor(diffMs/60000), hr = Math.floor(min/60), day = Math.floor(hr/24);
+  if (min < 60) return min <= 1 ? "just now" : `${min}m ago`;
+  if (hr < 24) return `${hr}h ago`;
+  if (day < 30) return `${day}d ago`;
+  const mo = Math.floor(day/30);
+  return mo < 12 ? `${mo}mo ago` : `${Math.floor(mo/12)}y ago`;
+}
+
+function clRender() {
+  const source = clState.view === "online" ? ONLINE_DATA : OFFLINE_DATA;
+  let rows = source.filter(d => {
+    if (clState.net && d.network !== clState.net) return false;
+    if (clState.conn === "wired" && !d.wired) return false;
+    if (clState.conn === "wireless" && d.wired) return false;
+    if (clState.search) {
+      const q = clState.search.toLowerCase();
+      if (!`${d.ip||""} ${d.display||""} ${d.mac}`.toLowerCase().includes(q)) return false;
+    }
+    return true;
+  });
+  rows.sort((a, b) => {
+    let av, bv;
+    switch (clState.sortKey) {
+      case "ip": av = a.ip||""; bv = b.ip||""; break;
+      case "display": av = (a.display||"￿").toLowerCase(); bv = (b.display||"￿").toLowerCase(); break;
+      case "mac": av = a.mac; bv = b.mac; break;
+      case "network": av = a.network; bv = b.network; break;
+      case "conn": av = a.wired?0:1; bv = b.wired?0:1; break;
+      case "lastSeen": av = a.lastSeen||""; bv = b.lastSeen||""; break;
+      case "parent": av = (a.parentName||a.parentMac||"").toLowerCase(); bv = (b.parentName||b.parentMac||"").toLowerCase(); break;
+      case "uptimeSec": av = a.uptimeSec ?? -1; bv = b.uptimeSec ?? -1; break;
+      default: av = a.ip||""; bv = b.ip||"";
+    }
+    if (av < bv) return -1*clState.sortDir;
+    if (av > bv) return 1*clState.sortDir;
+    return 0;
+  });
+  const tbody = document.getElementById("cl-tbody");
+  const colCount = 8; // online: +Uptime, offline: +Last connected -- same width
+  const totalMatched = rows.length;
+  const { pageRows, totalPages, clampedPage } = paginate(rows, clPage);
+  clPage = clampedPage;
+  if (pageRows.length === 0) {
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="${colCount}">No clients match this filter.</td></tr>`;
+  } else if (clState.view === "online") {
+    tbody.innerHTML = pageRows.map(d => `
+      <tr>
+        <td class="ip">${d.ip || "—"}</td>
+        <td>${d.display ? `<span class="name-cell">${d.display}</span>` : '<span class="muted-cell">unnamed</span>'}</td>
+        <td class="mac">${d.mac}</td>
+        <td class="muted-cell">${d.vendor || "—"}</td>
+        <td>${clBadge(d.network)}</td>
+        <td><span class="conn">${d.wired ? wiredIcon + " Wired" : wifiIcon + " " + (d.ssid || "Wireless") + (d.signal != null ? ` <span class="mono" style="color:${signalColor(d.signal)}">${d.signal} dBm</span>` : "")}</span></td>
+        <td>${deviceLinkCell(d.parentMac, d.parentName)}</td>
+        <td class="mono muted-cell">${fmtUptime(d.uptimeSec)}</td>
+      </tr>`).join("");
+  } else {
+    tbody.innerHTML = pageRows.map(d => `
+      <tr>
+        <td class="ip">${d.ip || "—"}</td>
+        <td>${d.display ? `<span class="name-cell">${d.display}</span>` : '<span class="muted-cell">unnamed</span>'}</td>
+        <td class="mac">${d.mac}</td>
+        <td class="muted-cell">${d.vendor || "—"}</td>
+        <td>${clBadge(d.network)}</td>
+        <td><span class="conn">${d.wired ? wiredIcon + " Wired" : wifiIcon + " Wireless"}</span></td>
+        <td><span class="lastseen"><span class="rel">${clRelativeTime(d.lastSeen)}</span></span></td>
+        <td>${deviceLinkCell(d.parentMac, d.parentName)}</td>
+      </tr>`).join("");
+  }
+  const startIdx = totalMatched === 0 ? 0 : (clPage-1)*PAGE_SIZE + 1;
+  const endIdx = Math.min(clPage*PAGE_SIZE, totalMatched);
+  document.getElementById("cl-footer").textContent = `Showing ${startIdx}-${endIdx} of ${totalMatched} ${clState.view === "online" ? "online" : "offline/historical"} clients (${source.length} total).`;
+  renderPaginationControls(document.getElementById("cl-pagination"), clPage, totalPages, p => { clPage = p; clRender(); });
+  clTheadEl.querySelectorAll("th").forEach(th => {
+    const arrow = th.querySelector(".arrow");
+    if (arrow) arrow.textContent = th.dataset.key === clState.sortKey ? (clState.sortDir === 1 ? "↑" : "↓") : "↕";
+  });
+  tbody.querySelectorAll(".device-link").forEach(el => {
+    el.addEventListener("click", e => { e.stopPropagation(); jumpToDevice(el.dataset.jumpMac); });
+  });
+}
+
+function clRenderStats() {
+  const data = clState.view === "online" ? ONLINE_DATA : OFFLINE_DATA;
+  const total = data.length, wired = data.filter(d => d.wired).length, wireless = total - wired;
+  const present = [...new Set(data.map(d => d.network))].filter(n => NETWORKS[n]);
+  const counts = {}; present.forEach(n => counts[n] = data.filter(d => d.network === n).length);
+  const top = present.slice().sort((a,b) => counts[b]-counts[a])[0];
+  const topMeta = top ? NETWORKS[top] : null;
+  const statsEl = document.getElementById("cl-stats");
+  if (total === 0) { statsEl.innerHTML = ""; return; }
+  if (clState.view === "online") {
+    statsEl.innerHTML = `
+      <div class="tile"><div class="label">Online now</div><div class="value good">${total}</div><div class="sub">clients on ${present.length} networks</div></div>
+      <div class="tile"><div class="label">Wired</div><div class="value">${wired}</div><div class="sub">${Math.round(wired/total*100)}%</div></div>
+      <div class="tile"><div class="label">Wireless</div><div class="value">${wireless}</div><div class="sub">${Math.round(wireless/total*100)}%</div></div>
+      ${topMeta ? `<div class="tile"><div class="label">Busiest network</div><div class="value" style="color:var(${topMeta.slot})">${counts[top]}</div><div class="sub">${topMeta.label}</div></div>` : ""}
+    `;
+  } else {
+    statsEl.innerHTML = `
+      <div class="tile"><div class="label">Known historical clients</div><div class="value" style="color:var(--text-secondary)">${total}</div><div class="sub">offline now</div></div>
+      <div class="tile"><div class="label">Wired</div><div class="value">${wired}</div><div class="sub">${Math.round(wired/total*100)}%</div></div>
+      <div class="tile"><div class="label">Wireless</div><div class="value">${wireless}</div><div class="sub">${Math.round(wireless/total*100)}%</div></div>
+    `;
+  }
+}
+document.getElementById("cl-search").addEventListener("input", e => { clState.search = e.target.value; clPage = 1; clRender(); });
+
+// ============================================================
+// USAGE — top talkers by bytes, from the controller's own per-client and
+// per-AP rollups. This is history we never recorded ourselves, so it's
+// available immediately rather than only from when this server started.
+// ============================================================
+function usageRows(rows, includeName) {
+  const total = rows.reduce((s, r) => s + r.totalBytes, 0) || 1;
+  return rows.map(r => `
+    <tr>
+      ${includeName ? `<td class="name-cell">${r.name || '<span class="muted-cell">unnamed</span>'}</td>
+      <td class="mac">${r.mac}</td>` : `<td class="name-cell">${r.name || r.mac}</td>`}
+      <td class="mono">${fmtBytes(r.rxBytes)}</td>
+      <td class="mono">${fmtBytes(r.txBytes)}</td>
+      <td class="mono">${fmtBytes(r.totalBytes)}</td>
+      <td><div class="util-bar"><div class="util-track"><div class="util-fill" style="width:${(r.totalBytes/total*100).toFixed(1)}%; background:var(--slot-1)"></div></div><span class="util-pct">${(r.totalBytes/total*100).toFixed(1)}%</span></div></td>
+    </tr>`).join("");
+}
+
+async function loadUsage(scope, range, tbodyId, noteId, colspan, includeName) {
+  const res = await fetch(`/api/usage/top?scope=${scope}&range=${range}`);
+  const d = await res.json();
+  const label = { "24h": "last 24 hours", "7d": "last 7 days", "30d": "last 30 days" }[range];
+  document.getElementById(noteId).textContent =
+    `${d.count} ${scope === "user" ? "clients" : "APs"} seen in the ${label} · from the controller's ${d.report} rollup.`;
+  const tbody = document.getElementById(tbodyId);
+  tbody.innerHTML = (d.rows || []).length === 0
+    ? `<tr class="empty-row"><td colspan="${colspan}">No usage recorded for this period.</td></tr>`
+    : usageRows(d.rows, includeName);
+}
+const loadClientUsage = r => loadUsage("user", r, "cl-usage-tbody", "cl-usage-note", 6, true);
+const loadApUsage = r => loadUsage("ap", r, "ap-usage-tbody", "ap-usage-note", 5, false);
+
+function wireUsageSeg(segId, loader) {
+  document.getElementById(segId).addEventListener("click", e => {
+    const btn = e.target.closest(".seg-btn2");
+    if (!btn) return;
+    document.querySelectorAll(`#${segId} .seg-btn2`).forEach(b => b.classList.toggle("active", b === btn));
+    loader(btn.dataset.range);
+  });
+}
+wireUsageSeg("clUsageRangeSeg", loadClientUsage);
+wireUsageSeg("apUsageRangeSeg", loadApUsage);
+
+// ============================================================
+// ROUTING — QoS shaping, policy-based routes and VPN tunnels.
+// ============================================================
+let routingData = null;
+
+// The controller encodes "unlimited" as -1 rather than null.
+function fmtKbps(v) {
+  if (v == null || v === -1) return "Unlimited";
+  return v >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0) + " Mbps" : v + " Kbps";
+}
+function enabledCell(on) {
+  return `<span class="conn"><span class="status-dot ${on ? "online" : "offline"}"></span>${on ? "Enabled" : "Disabled"}</span>`;
+}
+
+async function loadRouting() {
+  const res = await fetch("/api/routing");
+  routingData = await res.json();
+  renderRouting();
+}
+
+function renderRouting() {
+  const d = routingData;
+  if (!d) return;
+  const qos = d.qos || [], routes = d.routes || [], servers = d.vpnServers || [], clients = d.vpnClients || [];
+
+  document.getElementById("rt-stats").innerHTML = `
+    <div class="tile"><div class="label">QoS rules</div><div class="value">${qos.filter(q => q.enabled).length}<span class="unit">/ ${qos.length}</span></div><div class="sub">active shaping rules</div></div>
+    <div class="tile"><div class="label">Traffic routes</div><div class="value">${routes.filter(r => r.enabled).length}<span class="unit">/ ${routes.length}</span></div><div class="sub">policy-based routing</div></div>
+    <div class="tile"><div class="label">VPN servers</div><div class="value good">${servers.filter(s => s.enabled).length}<span class="unit">/ ${servers.length}</span></div><div class="sub">inbound tunnels</div></div>
+    <div class="tile"><div class="label">VPN clients</div><div class="value">${clients.filter(c => c.enabled).length}<span class="unit">/ ${clients.length}</span></div><div class="sub">outbound tunnels</div></div>
+    <div class="tile"><div class="label">Dynamic DNS</div><div class="value">${(d.ddns || []).length}</div><div class="sub">hostnames</div></div>`;
+
+  document.getElementById("rt-route-count").textContent = routes.length;
+  document.getElementById("rt-route-tbody").innerHTML = routes.length === 0
+    ? `<tr class="empty-row"><td colspan="6">No traffic routes configured.</td></tr>`
+    : routes.map(r => {
+      let matches = (r.matchingTarget || "").toLowerCase();
+      if (r.domains.length) matches = `${r.domains.length} domain${r.domains.length === 1 ? "" : "s"}`;
+      else if (r.ipAddresses.length || r.ipRanges.length) matches = `${r.ipAddresses.length + r.ipRanges.length} IP targets`;
+      else if (r.regions.length) matches = `${r.regions.length} regions`;
+      return `<tr${r.enabled ? "" : ' style="opacity:.55"'}>
+        <td class="name-cell">${r.description || "—"}</td>
+        <td class="muted-cell">${matches}${r.domains.length ? `<div class="flow-dom">${r.domains.slice(0,3).join(", ")}${r.domains.length > 3 ? ` +${r.domains.length - 3}` : ""}</div>` : ""}</td>
+        <td>${(r.targets || []).join(", ") || "—"}</td>
+        <td class="name-cell">${r.via || "—"}</td>
+        <td>${r.killSwitch ? '<span class="flow-chip" style="background:color-mix(in srgb, var(--warning) 16%, transparent); color:var(--warning)">on</span>' : '<span class="muted-cell">off</span>'}</td>
+        <td>${enabledCell(r.enabled)}</td>
+      </tr>`;
+    }).join("");
+
+  const vpnCard = (title, rows, note) => `
+    <div class="card" style="padding-bottom:12px;">
+      <div class="card-head"><div class="card-title">${title}</div><span class="muted-cell" style="font-size:11px;">${note}</span></div>
+      ${rows.length === 0 ? `<div class="muted-cell" style="font-size:12px;">None configured.</div>` : `
+      <table><thead><tr><th>Name</th><th>Type</th><th>Subnet</th><th>Status</th></tr></thead><tbody>
+        ${rows.map(v => `<tr${v.enabled ? "" : ' style="opacity:.55"'}>
+          <td class="name-cell">${v.name || "—"}</td>
+          <td class="muted-cell">${(v.type || "").replace(/-/g, " ")}</td>
+          <td class="mono muted-cell">${v.subnet || "—"}</td>
+          <td>${enabledCell(v.enabled)}</td></tr>`).join("")}
+      </tbody></table>`}
+    </div>`;
+  document.getElementById("rt-vpn-grid").innerHTML =
+    vpnCard("VPN servers", servers, "remote access into this network") +
+    vpnCard("VPN clients", clients, "outbound tunnels for routing");
+
+  document.getElementById("rt-qos-count").textContent = qos.length;
+  document.getElementById("rt-qos-tbody").innerHTML = qos.length === 0
+    ? `<tr class="empty-row"><td colspan="7">No QoS rules configured.</td></tr>`
+    : qos.map(q => `
+      <tr${q.enabled ? "" : ' style="opacity:.55"'}>
+        <td class="name-cell">${q.name || "—"}</td>
+        <td class="muted-cell">${(q.objective || "").replace(/_/g, " ").toLowerCase()}</td>
+        <td class="muted-cell">${q.destination}</td>
+        <td class="mono">${q.downKbps == null ? '<span class="muted-cell">—</span>' : fmtKbps(q.downKbps)}</td>
+        <td class="mono">${q.upKbps == null ? '<span class="muted-cell">—</span>' : fmtKbps(q.upKbps)}</td>
+        <td class="muted-cell">${[q.downBurst, q.upBurst].filter(b => b && b !== "OFF").join(" / ").toLowerCase() || "off"}</td>
+        <td>${enabledCell(q.enabled)}</td>
+      </tr>`).join("");
+
+  const dd = d.ddns || [];
+  document.getElementById("rt-ddns-count").textContent = dd.length;
+  document.getElementById("rt-ddns-tbody").innerHTML = dd.length === 0
+    ? `<tr class="empty-row"><td colspan="4">No dynamic DNS configured.</td></tr>`
+    : dd.map(x => `<tr>
+        <td class="name-cell">${x.host || "—"}</td>
+        <td class="muted-cell">${x.service || "—"}</td>
+        <td class="mono muted-cell">${x.server || "—"}</td>
+        <td class="muted-cell">${(x.interface || "").toUpperCase()}</td>
+      </tr>`).join("");
+}
+
+// ============================================================
+// CONFIG — WLAN / network / port-profile inventory.
+// ============================================================
+let configData = null;
+let cfNetSearch = "";
+
+async function loadConfig() {
+  const res = await fetch("/api/config");
+  configData = await res.json();
+  renderConfig();
+}
+
+function renderConfig() {
+  const d = configData;
+  if (!d) return;
+  const wlans = d.wlans || [];
+  document.getElementById("cf-wlan-count").textContent = wlans.length;
+  document.getElementById("cf-wlan-tbody").innerHTML = wlans.length === 0
+    ? `<tr class="empty-row"><td colspan="8">No wireless networks configured.</td></tr>`
+    : wlans.map(w => {
+      const open = (w.security || "") === "open";
+      return `<tr${w.enabled ? "" : ' style="opacity:.55"'}>
+        <td class="name-cell">${w.ssid || "—"}</td>
+        <td>${open
+          ? '<span class="flow-chip" style="background:color-mix(in srgb, var(--warning) 16%, transparent); color:var(--warning)">open</span>'
+          : `<span class="muted-cell">${w.security}${w.wpaMode ? ` · ${w.wpaMode}` : ""}</span>`}</td>
+        <td class="muted-cell">${w.band === "both" ? "2.4 + 5 GHz" : (w.band || "—")}</td>
+        <td>${clBadge(w.network)}</td>
+        <td class="muted-cell">${w.userGroup || "—"}</td>
+        <td class="muted-cell">${w.isGuest ? "Yes" : "—"}</td>
+        <td class="muted-cell">${w.hidden ? "Yes" : "—"}</td>
+        <td>${enabledCell(w.enabled)}</td>
+      </tr>`;
+    }).join("");
+
+  renderConfigNetworks();
+
+  const ug = d.userGroups || [], pp = d.portProfiles || [];
+  document.getElementById("cf-groups-grid").innerHTML = `
+    <div class="card" style="padding-bottom:12px;">
+      <div class="card-head"><div class="card-title">Bandwidth groups</div><span class="muted-cell" style="font-size:11px;">per-client rate limits</span></div>
+      ${ug.length === 0 ? `<div class="muted-cell" style="font-size:12px;">None configured.</div>` : `
+      <table><thead><tr><th>Group</th><th>Download</th><th>Upload</th></tr></thead><tbody>
+        ${ug.map(g => `<tr><td class="name-cell">${g.name || "—"}</td>
+          <td class="mono">${fmtKbps(g.downKbps)}</td>
+          <td class="mono">${fmtKbps(g.upKbps)}</td></tr>`).join("")}
+      </tbody></table>`}
+    </div>
+    <div class="card" style="padding-bottom:12px;">
+      <div class="card-head"><div class="card-title">Switch port profiles</div><span class="muted-cell" style="font-size:11px;">${pp.length} profiles</span></div>
+      ${pp.length === 0 ? `<div class="muted-cell" style="font-size:12px;">None configured.</div>` : `
+      <table><thead><tr><th>Profile</th><th>Native network</th><th>Forward</th><th>PoE</th></tr></thead><tbody>
+        ${pp.map(p => `<tr><td class="name-cell">${p.name || "—"}</td>
+          <td class="muted-cell">${p.nativeNetwork || "—"}</td>
+          <td class="muted-cell">${p.forward || "—"}</td>
+          <td class="muted-cell">${p.poeMode || "—"}</td></tr>`).join("")}
+      </tbody></table>`}
+    </div>`;
+}
+
+function renderConfigNetworks() {
+  const all = configData.networks || [];
+  const q = cfNetSearch.trim().toLowerCase();
+  const rows = q
+    ? all.filter(n => `${n.name||""} ${n.subnet||""} ${n.purpose||""}`.toLowerCase().includes(q))
+    : all;
+  document.getElementById("cf-net-count").textContent = q ? `${rows.length} of ${all.length}` : all.length;
+  document.getElementById("cf-net-tbody").innerHTML = rows.length === 0
+    ? `<tr class="empty-row"><td colspan="7">${all.length === 0 ? "No networks configured." : "No networks match this search."}</td></tr>`
+    : rows.map(n => `<tr${n.enabled === false ? ' style="opacity:.55"' : ""}>
+        <td class="name-cell">${n.name || "—"}</td>
+        <td class="muted-cell">${(n.purpose || "").replace(/-/g, " ")}</td>
+        <td class="mono">${n.vlan ?? "—"}</td>
+        <td class="mono muted-cell">${n.subnet || "—"}</td>
+        <td class="mono muted-cell">${n.dhcpRange || "—"}</td>
+        <td class="mono muted-cell">${(n.dns || []).join(", ") || "—"}</td>
+        <td>${enabledCell(n.enabled !== false)}</td>
+      </tr>`).join("");
+}
+document.getElementById("cf-net-search").addEventListener("input", e => {
+  cfNetSearch = e.target.value; renderConfigNetworks();
+});
+
+// ============================================================
+// FIREWALL — policy/NAT configuration. Zone and address-group ids are
+// resolved to names server-side; this only lays them out.
+// ============================================================
+let firewallData = null;
+let fwGroupState = { search: "", type: "" };
+
+function fwActionChip(action) {
+  const block = (action || "").toUpperCase() === "BLOCK";
+  const rej = (action || "").toUpperCase() === "REJECT";
+  const c = block || rej ? "--critical" : "--good";
+  return `<span class="flow-chip" style="background:color-mix(in srgb, var(${c}) 16%, transparent); color:var(${c})">${action || "—"}</span>`;
+}
+function fwEndpoint(ep) {
+  if (!ep) return "—";
+  const zone = ep.zone && ep.zone !== "Any" ? `<span class="ep-sub">${ep.zone}</span>` : "";
+  return `<div class="flow-ep"><span class="ep-name">${ep.what || "Any"}${ep.ports ? ` <span class="muted-cell">:${ep.ports}</span>` : ""}</span>${zone}</div>`;
+}
+
+async function loadFirewall() {
+  const res = await fetch("/api/firewall");
+  firewallData = await res.json();
+  renderFirewall();
+}
+
+function renderFirewall() {
+  const d = firewallData;
+  if (!d) return;
+  const pols = d.policies || [], pfs = d.portForwards || [];
+  const blockHits = pols.filter(p => (p.action || "").toUpperCase() === "BLOCK")
+    .reduce((s, p) => s + (p.hits || 0), 0);
+  const unused = pols.filter(p => !p.hits).length;
+
+  document.getElementById("fw-stats").innerHTML = `
+    <div class="tile"><div class="label">Policies</div><div class="value">${pols.filter(p => p.enabled).length}<span class="unit">/ ${pols.length}</span></div><div class="sub">enabled · ${unused} never matched</div></div>
+    <div class="tile"><div class="label">Traffic blocked</div><div class="value ${blockHits ? "critical" : ""}">${blockHits.toLocaleString()}</div><div class="sub">lifetime rule hits</div></div>
+    <div class="tile"><div class="label">Port forwards</div><div class="value">${pfs.filter(f => f.enabled).length}<span class="unit">/ ${pfs.length}</span></div><div class="sub">inbound exposures</div></div>
+    <div class="tile"><div class="label">Groups</div><div class="value">${(d.groups || []).length}</div><div class="sub">address &amp; port objects</div></div>
+    <div class="tile"><div class="label">Zones</div><div class="value">${(d.zones || []).length}</div><div class="sub">firewall zones</div></div>`;
+
+  document.getElementById("fw-policy-count").textContent = pols.length;
+  document.getElementById("fw-policy-tbody").innerHTML = pols.length === 0
+    ? `<tr class="empty-row"><td colspan="8">No firewall policies configured.</td></tr>`
+    : pols.map(p => `
+      <tr${p.enabled ? "" : ' style="opacity:.55"'}>
+        <td>${fwActionChip(p.action)}</td>
+        <td class="name-cell">${p.name || "—"}${p.predefined ? ' <span class="muted-cell" style="font-size:10.5px;">(built-in)</span>' : ""}</td>
+        <td>${fwEndpoint(p.source)}</td>
+        <td>${fwEndpoint(p.destination)}</td>
+        <td class="muted-cell">${(p.protocol || "all").toUpperCase()}</td>
+        <td class="mono">${p.hits != null ? p.hits.toLocaleString() : '<span class="muted-cell">never</span>'}</td>
+        <td class="mono muted-cell">${p.lastHit ? clRelativeTime(new Date(p.lastHit).toISOString()) : "—"}</td>
+        <td><span class="conn"><span class="status-dot ${p.enabled ? "online" : "offline"}"></span>${p.enabled ? "Enabled" : "Disabled"}</span></td>
+      </tr>`).join("");
+
+  document.getElementById("fw-pf-count").textContent = pfs.length;
+  document.getElementById("fw-pf-tbody").innerHTML = pfs.length === 0
+    ? `<tr class="empty-row"><td colspan="7">No port forwards configured.</td></tr>`
+    : pfs.map(f => `
+      <tr${f.enabled ? "" : ' style="opacity:.55"'}>
+        <td class="name-cell">${f.name || "—"}</td>
+        <td class="muted-cell">${(f.proto || "").replace("_", "/").toUpperCase()}</td>
+        <td class="mono">${f.wanPort || "—"}</td>
+        <td class="mono">${f.fwdIp || "—"}${f.fwdPort ? `:${f.fwdPort}` : ""}</td>
+        <td class="muted-cell">${f.src && f.src !== "any" ? f.src : "Any"}</td>
+        <td class="muted-cell">${f.log ? "On" : "Off"}</td>
+        <td><span class="conn"><span class="status-dot ${f.enabled ? "online" : "offline"}"></span>${f.enabled ? "Enabled" : "Disabled"}</span></td>
+      </tr>`).join("");
+
+  renderFwGroupTypes();
+  renderFwGroups();
+
+  document.getElementById("fw-zone-count").textContent = (d.zones || []).length;
+  document.getElementById("fw-zone-grid").innerHTML = (d.zones || []).map(z => {
+    const used = (d.policies || []).filter(p => p.source?.zone === z.name || p.destination?.zone === z.name).length;
+    return `<div class="rtt-card">
+      <div class="rtt-card-head"><span class="rtt-card-title">${z.name}</span>
+        <span class="rtt-card-now" style="color:var(${used ? "--slot-1" : "--text-muted"})">${used} rule${used === 1 ? "" : "s"}</span></div>
+      <div class="rtt-card-foot">key: ${z.key || "—"}</div>
+    </div>`;
+  }).join("");
+}
+
+function renderFwGroupTypes() {
+  const el = document.getElementById("fwGroupTypeSeg");
+  const types = [...new Set((firewallData.groups || []).map(g => g.type).filter(Boolean))].sort();
+  const sig = types.join("|") + "||" + fwGroupState.type;
+  if (el.dataset.sig === sig) return;
+  el.dataset.sig = sig;
+  el.innerHTML = "";
+  const mk = (val, label) => {
+    const b = document.createElement("button");
+    b.className = "seg-btn2" + (fwGroupState.type === val ? " active" : "");
+    b.textContent = label;
+    b.addEventListener("click", () => { fwGroupState.type = val; renderFwGroupTypes(); renderFwGroups(); });
+    el.appendChild(b);
+  };
+  mk("", "All types");
+  types.forEach(t => mk(t, t.replace(/-/g, " ").replace(/^./, c => c.toUpperCase())));
+}
+
+function renderFwGroups() {
+  const all = firewallData.groups || [];
+  const q = fwGroupState.search.trim().toLowerCase();
+  let rows = all;
+  if (fwGroupState.type) rows = rows.filter(g => g.type === fwGroupState.type);
+  if (q) rows = rows.filter(g => `${g.name || ""} ${(g.members || []).join(" ")}`.toLowerCase().includes(q));
+  const filtered = q || fwGroupState.type;
+  document.getElementById("fw-group-count").textContent = filtered ? `${rows.length} of ${all.length}` : all.length;
+  document.getElementById("fw-group-tbody").innerHTML = rows.length === 0
+    ? `<tr class="empty-row"><td colspan="3">${all.length === 0 ? "No groups configured." : "No groups match this filter."}</td></tr>`
+    : rows.map(g => {
+      const mem = g.members || [];
+      const shown = mem.slice(0, 6).join(", ");
+      return `<tr>
+        <td class="name-cell">${g.name || "—"}</td>
+        <td class="muted-cell">${(g.type || "").replace(/-/g, " ")}</td>
+        <td class="mono muted-cell">${mem.length === 0 ? "—" : shown}${mem.length > 6 ? ` <span class="more-pill">+${mem.length - 6}</span>` : ""}</td>
+      </tr>`;
+    }).join("");
+}
+
+document.getElementById("fw-group-search").addEventListener("input", e => {
+  fwGroupState.search = e.target.value; renderFwGroups();
+});
+
+// ============================================================
+// WIFI HEALTH — connection success, channel occupancy and per-AP radio
+// density, all from the controller's aggregated-dashboard rollup.
+// ============================================================
+let wifiHealth = null;
+// The controller scores sessions into experience bands by id; higher = better.
+const EXPERIENCE_LABEL = { 90: "Excellent", 80: "Very good", 70: "Good", 60: "Fair", 50: "Poor", 40: "Very poor" };
+const DOCTOR_LABEL = {
+  OPTIMIZE_IOT_CONNECTIVITY: "Optimise IoT connectivity",
+  UPDATE_DEVICE_FIRMWARE: "Update device firmware",
+  INTER_ROAMING_ENHANCEMENT: "Roaming enhancement",
+  OPTIMIZE_WIRED_AP_CONNECTIVITY: "Optimise wired AP uplinks",
+};
+
+async function loadWifiHealth() {
+  const res = await fetch("/api/wifi/health");
+  wifiHealth = await res.json();
+  renderWifiHealth();
+}
+
+function renderWifiHealth() {
+  const d = wifiHealth;
+  if (!d) return;
+
+  // "all" is the controller's own roll-up across radios -- use it for the
+  // headline and show the per-band rows separately rather than re-deriving.
+  const conns = d.connectivity || [];
+  const overall = conns.find(c => c.radio_filter === "all");
+  const perBand = conns.filter(c => c.radio_filter !== "all")
+    .sort((a, b) => (b.attempts?.total_attempts || 0) - (a.attempts?.total_attempts || 0));
+  const oa = overall ? overall.attempts : null;
+  const pending = (d.doctor?.actions || []).filter(a => a.optimization_status === "PENDING");
+
+  document.getElementById("wifi-health-tiles").innerHTML = `
+    <div class="tile">
+      <div class="label">Connection success</div>
+      <div class="value ${oa && oa.success_ratio >= 99 ? "good" : oa && oa.success_ratio >= 90 ? "warning" : oa ? "critical" : ""}">${oa ? oa.success_ratio.toFixed(1) : "—"}<span class="unit">%</span></div>
+      <div class="sub">${oa ? `${oa.total_attempts.toLocaleString()} attempts` : "not reported"}</div>
+    </div>
+    <div class="tile">
+      <div class="label">Failed connections</div>
+      <div class="value ${oa && oa.failed_client_connections ? "critical" : "good"}">${oa ? oa.failed_client_connections : "—"}</div>
+      <div class="sub">assoc / auth / DHCP / DNS</div>
+    </div>
+    <div class="tile">
+      <div class="label">WiFi Doctor</div>
+      <div class="value ${pending.length ? "warning" : "good"}" style="font-size:17px;">${pending.length ? `${pending.length} pending` : "All clear"}</div>
+      <div class="sub">${(d.doctor?.actions || []).length} checks</div>
+    </div>`;
+
+  document.getElementById("wifi-doctor-note").innerHTML = pending.length === 0 ? "" : `
+    <p class="muted-cell" style="font-size:12px; margin:0 0 10px;">
+      Suggested by the controller: ${pending.map(a => DOCTOR_LABEL[a.id] || a.id).join(", ")}.
+    </p>`;
+
+  // Per-stage success: each ratio is a distinct failure mode, so showing
+  // them separately points at *where* a connection breaks, not just that it did.
+  const stageRows = perBand.map(c => {
+    const a = c.attempts || {};
+    const cell = v => `<span style="color:${v >= 99 ? "var(--good)" : v >= 90 ? "var(--warning)" : "var(--critical)"}">${v != null ? v.toFixed(1) + "%" : "—"}</span>`;
+    return `<tr>
+      <td><span class="badge" style="background:color-mix(in srgb, var(${BAND_SLOT[c.radio_filter]||'--slot-1'}) 16%, transparent); color:var(${BAND_SLOT[c.radio_filter]||'--slot-1'})"><span class="dot" style="background:var(${BAND_SLOT[c.radio_filter]||'--slot-1'})"></span>${BAND_LABEL[c.radio_filter] || c.radio_filter}</span></td>
+      <td class="mono">${(a.total_attempts || 0).toLocaleString()}</td>
+      <td class="mono">${cell(a.association_ratio)}</td>
+      <td class="mono">${cell(a.authentication_ratio)}</td>
+      <td class="mono">${cell(a.dhcp_ratio)}</td>
+      <td class="mono">${cell(a.dns_ratio)}</td>
+      <td class="mono" style="color:${a.failed_client_connections ? "var(--critical)" : "var(--text-muted)"}">${a.failed_client_connections ?? 0}</td>
+    </tr>`;
+  });
+
+  const exp = (d.experience || []).slice().sort((a, b) => b.category_id - a.category_id);
+  const expTotal = exp.reduce((s, e) => s + (e.session_percentage || 0), 0) || 1;
+  const expRows = exp.map(e => {
+    const pct = e.session_percentage || 0;
+    const good = e.category_id >= 70;
+    const color = e.category_id >= 80 ? "--good" : e.category_id >= 60 ? "--slot-1" : e.category_id >= 50 ? "--warning" : "--critical";
+    return `
+      <div class="bd-row">
+        <span class="bd-label">${EXPERIENCE_LABEL[e.category_id] || e.category_id}</span>
+        <span class="bd-track"><span class="bd-fill" style="width:${(pct/expTotal*100).toFixed(1)}%; background:var(${color})"></span></span>
+        <span class="bd-val">${pct.toFixed(1)}%</span>
+      </div>`;
+  }).join("");
+
+  document.getElementById("wifi-health-grid").innerHTML = `
+    <div class="card" style="padding-bottom:12px;">
+      <div class="card-head"><div class="card-title">Connection stages by band</div></div>
+      ${stageRows.length === 0 ? `<div class="muted-cell" style="font-size:12px;">Not reported.</div>` : `
+      <table><thead><tr><th>Band</th><th>Attempts</th><th>Assoc</th><th>Auth</th><th>DHCP</th><th>DNS</th><th>Failed</th></tr></thead>
+        <tbody>${stageRows.join("")}</tbody></table>`}
+    </div>
+    <div class="card">
+      <div class="card-head"><div class="card-title">Client experience</div>
+        <span class="muted-cell" style="font-size:11px;">share of sessions</span></div>
+      <div style="padding-bottom:8px;">${expRows || `<div class="muted-cell" style="font-size:12px;">Not reported.</div>`}</div>
+    </div>`;
+
+  // Channels
+  document.getElementById("wifi-channel-grid").innerHTML = (d.channels || []).map(c => {
+    const act = (c.active_channels || []).slice().sort((a, b) => a.channel - b.channel);
+    const maxClients = Math.max(1, ...act.map(a => a.client_count));
+    return `
+      <div class="card" style="padding-bottom:12px;">
+        <div class="card-head"><div class="card-title">${BAND_LABEL[c.radio] || c.radio}</div>
+          <span class="muted-cell" style="font-size:11px;">${act.length} of ${(c.available_channels || []).length} channels in use</span></div>
+        <div style="padding-bottom:6px;">
+          ${act.length === 0 ? `<div class="muted-cell" style="font-size:12px;">No active channels.</div>` : act.map(a => `
+            <div class="bd-row">
+              <span class="bd-label">Ch ${a.channel}${a.ap_count > 1 ? ` <span class="muted-cell">(${a.ap_count} APs)</span>` : ""}</span>
+              <span class="bd-track"><span class="bd-fill" style="width:${(a.client_count/maxClients*100).toFixed(1)}%; background:var(${BAND_SLOT[c.radio]||'--slot-1'})"></span></span>
+              <span class="bd-val">${a.client_count} client${a.client_count === 1 ? "" : "s"}</span>
+            </div>`).join("")}
+        </div>
+      </div>`;
+  }).join("");
+
+  // AP radio density -- skip the per-AP "all" rollup row so bands compare cleanly
+  const rows = [];
+  (d.density || []).forEach(ap => {
+    (ap.radio_groups || []).filter(g => g.radio_filter !== "all").forEach(g => {
+      rows.push({ name: ap.device_meta?.name || ap.device_meta?.mac, model: ap.device_meta?.model, ...g });
+    });
+  });
+  rows.sort((a, b) => (a.name || "").localeCompare(b.name || "") || (a.radio_filter || "").localeCompare(b.radio_filter || ""));
+  document.getElementById("wifi-density-count").textContent = (d.density || []).length + " APs";
+  document.getElementById("wifi-density-tbody").innerHTML = rows.length === 0
+    ? `<tr class="empty-row"><td colspan="8">No radio density data reported.</td></tr>`
+    : rows.map(r => `
+      <tr>
+        <td class="name-cell">${r.name || "—"}</td>
+        <td><span class="badge" style="background:color-mix(in srgb, var(${BAND_SLOT[r.radio_filter]||'--slot-1'}) 16%, transparent); color:var(${BAND_SLOT[r.radio_filter]||'--slot-1'})"><span class="dot" style="background:var(${BAND_SLOT[r.radio_filter]||'--slot-1'})"></span>${BAND_LABEL[r.radio_filter] || r.radio_filter}</span></td>
+        <td class="mono">${r.clients_count ?? 0}</td>
+        <td class="mono" style="color:${signalColor(r.signal_avg)}">${r.signal_avg != null ? r.signal_avg + " dBm" : "—"}</td>
+        <td class="mono" style="color:${signalColor(r.weakest_clients_signal_avg)}">${r.weakest_clients_signal_avg != null ? r.weakest_clients_signal_avg + " dBm" : "—"}</td>
+        <td class="mono muted-cell">${r.phy_rate_max ? fmtBits(r.phy_rate_max * 1000) : "—"}</td>
+        <td><div class="util-bar"><div class="util-track"><div class="util-fill" style="width:${Math.min(100, r.total_traffic_percentage || 0)}%; background:var(--slot-1)"></div></div><span class="util-pct">${(r.total_traffic_percentage ?? 0).toFixed(1)}%</span></div></td>
+        <td>${retryColor(r.tx_retries_percentage || 0) ? `<span class="retry-warn" style="color:${retryColor(r.tx_retries_percentage)}">${warnIcon}${(r.tx_retries_percentage).toFixed(1)}%</span>` : `<span class="mono muted-cell">${(r.tx_retries_percentage ?? 0).toFixed(1)}%</span>`}</td>
+      </tr>`).join("");
+}
+
+// ============================================================
+// HEALTH — subsystem status, controller anomalies and the event log.
+// All of it is the controller's own diagnosis; we only reshape it.
+// ============================================================
+let healthData = null;
+let healthEventState = { search: "", sev: "", cat: "" };
+let healthEventPage = 1;
+
+const SUBSYSTEM_LABEL = { wlan: "WiFi", wan: "WAN", www: "Internet", lan: "LAN", vpn: "VPN" };
+// Controller anomaly constants -> plain English. Unknown keys fall back to a
+// prettified version of the constant rather than being hidden.
+const ANOMALY_LABEL = {
+  USER_DNS_TIMEOUT: "DNS timeouts",
+  USER_HIGH_DNS_LATENCY: "High DNS latency",
+  USER_HIGH_TCP_LATENCY: "High TCP latency",
+  USER_HIGH_TCP_PACKET_LOSS: "High TCP packet loss",
+  USER_HIGH_WIFI_LATENCY: "High WiFi latency",
+  USER_HIGH_WIFI_RETRIES: "High WiFi retries",
+  USER_LOW_PHY_RATE: "Low PHY rate",
+  USER_POOR_STREAM_EFF: "Poor stream efficiency",
+  USER_SLEEPY_CLIENT: "Sleepy client",
+  USER_SIGNAL_STRENGTH_FAILURES: "Weak signal failures",
+  AP_HIGH_UTILISATION: "AP high utilisation",
+  AP_LONG_MAX_ASSOCIATION_TIME: "Slow client association",
+};
+function anomalyLabel(k) {
+  if (ANOMALY_LABEL[k]) return ANOMALY_LABEL[k];
+  return (k || "").replace(/^(USER|AP)_/, "").replace(/_/g, " ").toLowerCase()
+    .replace(/^./, c => c.toUpperCase());
+}
+function sevColor(s) {
+  return s === "HIGH" ? "--critical" : s === "MEDIUM" ? "--warning" : "--slot-1";
+}
+function statusColor(s) { return s === "ok" ? "--good" : s ? "--critical" : "--text-muted"; }
+
+async function loadHealth() {
+  const res = await fetch("/api/health");
+  healthData = await res.json();
+  renderHealth();
+}
+
+function renderHealth() {
+  const d = healthData;
+  if (!d) return;
+
+  document.getElementById("health-subsystems").innerHTML = (d.subsystems || []).map(s => {
+    const bits = [];
+    if (s.numUser != null) bits.push(`${s.numUser} clients`);
+    if (s.numAp != null) bits.push(`${s.numAp} APs`);
+    if (s.numSw != null) bits.push(`${s.numSw} switches`);
+    if (s.numGw != null) bits.push(`${s.numGw} gateway`);
+    if (s.latency != null) bits.push(`${s.latency} ms`);
+    if (s.drops != null) bits.push(`${s.drops} drops`);
+    if (s.wanIp) bits.push(s.wanIp);
+    const bad = (s.numDisconnected || 0) > 0;
+    return `
+      <div class="tile">
+        <div class="label">${SUBSYSTEM_LABEL[s.subsystem] || s.subsystem}</div>
+        <div class="value" style="font-size:17px; color:var(${statusColor(s.status)})">${(s.status || "—").toUpperCase()}</div>
+        <div class="sub">${bits.join(" · ") || "&nbsp;"}${bad ? ` · <span style="color:var(--critical)">${s.numDisconnected} down</span>` : ""}</div>
+      </div>`;
+  }).join("");
+
+  const sys = d.system || {}, ips = d.ips || {}, net = d.internetHealth || {};
+  const windowHrs = net.windowStart && net.windowEnd
+    ? ((net.windowEnd - net.windowStart) / 3600000).toFixed(0) : null;
+  document.getElementById("health-meta").innerHTML = `
+    <div class="tile">
+      <div class="label">Controller</div>
+      <div class="value" style="font-size:17px;">${sys.version || "—"}</div>
+      <div class="sub">${sys.updateAvailable ? '<span style="color:var(--warning)">update available</span>' : "up to date"} · up ${fmtUptime(sys.uptimeSec)}</div>
+    </div>
+    <div class="tile">
+      <div class="label">Threat protection</div>
+      <div class="value ${ips.threats ? "critical" : "good"}" style="font-size:17px;">${ips.ips_enabled ? (ips.threats ? `${ips.threats} threats` : "0 threats") : "disabled"}</div>
+      <div class="sub">${fmtBytes(ips.scanned_bytes)} scanned · ${(ips.signatures || 0).toLocaleString()} signatures</div>
+    </div>
+    <div class="tile">
+      <div class="label">Internet stability</div>
+      <div class="value ${net.issues ? "warning" : "good"}" style="font-size:17px;">${net.issues ? `${net.issues} issue${net.issues === 1 ? "" : "s"}` : "No issues"}</div>
+      <div class="sub">${net.samples || 0} samples${windowHrs ? ` over ${windowHrs}h` : ""}</div>
+    </div>
+    <div class="tile">
+      <div class="label">Active alarms</div>
+      <div class="value ${(d.alarms || []).length ? "critical" : "good"}" style="font-size:17px;">${(d.alarms || []).length}</div>
+      <div class="sub">controller alarms</div>
+    </div>`;
+
+  const anom = d.anomalies || [];
+  document.getElementById("health-anom-count").textContent = anom.length;
+  document.getElementById("health-anom-tbody").innerHTML = anom.length === 0
+    ? `<tr class="empty-row"><td colspan="5">No anomalies reported — the controller sees nothing wrong.</td></tr>`
+    : anom.map(a => `
+      <tr>
+        <td class="name-cell">${anomalyLabel(a.anomaly)}</td>
+        <td>${a.name || '<span class="muted-cell">unknown</span>'}</td>
+        <td class="mac">${a.mac || "—"}</td>
+        <td class="mono" style="color:${a.count > 20 ? "var(--warning)" : "var(--text-primary)"}">${a.count}</td>
+        <td class="mono muted-cell">${a.lastSeen ? clRelativeTime(new Date(a.lastSeen).toISOString()) : "—"}</td>
+      </tr>`).join("");
+
+  renderHealthCatFilter();
+  renderHealthEvents();
+}
+
+function renderHealthCatFilter() {
+  const el = document.getElementById("health-cat-filter");
+  const cats = [...new Set((healthData.events || []).map(e => e.category).filter(Boolean))].sort();
+  const sig = cats.join("|") + "||" + healthEventState.cat;
+  if (el.dataset.sig === sig) return;
+  el.dataset.sig = sig;
+  el.innerHTML = "";
+  const mk = (val, label) => {
+    const b = document.createElement("button");
+    b.className = "chip-btn" + (healthEventState.cat === val ? " active" : "");
+    b.textContent = label;
+    b.addEventListener("click", () => {
+      healthEventState.cat = val; healthEventPage = 1;
+      renderHealthCatFilter(); renderHealthEvents();
+    });
+    el.appendChild(b);
+  };
+  mk("", "All categories");
+  cats.forEach(c => mk(c, c.replace(/_/g, " ").toLowerCase().replace(/^./, x => x.toUpperCase())));
+}
+
+function renderHealthEvents() {
+  const all = healthData.events || [];
+  const q = healthEventState.search.trim().toLowerCase();
+  let rows = all;
+  if (healthEventState.sev) rows = rows.filter(e => e.severity === healthEventState.sev);
+  if (healthEventState.cat) rows = rows.filter(e => e.category === healthEventState.cat);
+  if (q) rows = rows.filter(e => `${e.message || ""} ${e.clientName || ""} ${e.deviceName || ""} ${e.key || ""}`.toLowerCase().includes(q));
+
+  const filtered = q || healthEventState.sev || healthEventState.cat;
+  document.getElementById("health-event-count").textContent =
+    filtered ? `${rows.length} of ${all.length}` : all.length;
+
+  const tbody = document.getElementById("health-event-tbody");
+  if (rows.length === 0) {
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="4">${all.length === 0 ? "No events recorded." : "No events match this filter."}</td></tr>`;
+    renderPaginationControls(document.getElementById("health-event-pagination"), 1, 1, () => {});
+    return;
+  }
+  const { pageRows, totalPages, clampedPage } = paginate(rows, healthEventPage);
+  healthEventPage = clampedPage;
+  tbody.innerHTML = pageRows.map(e => `
+    <tr>
+      <td class="mono muted-cell">${e.time ? new Date(e.time).toLocaleTimeString(undefined, {hour:"numeric", minute:"2-digit", second:"2-digit"}) : "—"}</td>
+      <td><span class="flow-chip" style="background:color-mix(in srgb, var(${sevColor(e.severity)}) 16%, transparent); color:var(${sevColor(e.severity)})">${e.severity || "—"}</span></td>
+      <td class="muted-cell">${(e.category || "").replace(/_/g, " ").toLowerCase()}</td>
+      <td>${e.message || e.key || "—"}</td>
+    </tr>`).join("");
+  renderPaginationControls(document.getElementById("health-event-pagination"), healthEventPage, totalPages,
+    p => { healthEventPage = p; renderHealthEvents(); });
+}
+
+document.getElementById("healthSevSeg").addEventListener("click", e => {
+  const btn = e.target.closest(".seg-btn2");
+  if (!btn) return;
+  healthEventState.sev = btn.dataset.sev;
+  document.querySelectorAll("#healthSevSeg .seg-btn2").forEach(b => b.classList.toggle("active", b === btn));
+  healthEventPage = 1; renderHealthEvents();
+});
+document.getElementById("health-event-search").addEventListener("input", e => {
+  healthEventState.search = e.target.value; healthEventPage = 1; renderHealthEvents();
+});
+
+// ============================================================
+// FLOWS — controller traffic-flow data. Two sources with different scopes:
+//   /api/flows/stats  = controller-side rollup for the whole period (totals)
+//   /api/flows/recent = newest ~1000 raw flows (log + sample breakdowns)
+// They deliberately disagree in magnitude; the UI labels which is which.
+// ============================================================
+let flowPeriod = "DAY";
+let flowStats = null, flowRecent = null;
+let flowLogState = { search: "", action: "", dir: "" };
+let flowLogPage = 1;
+
+const REGION_NAMES = { US:"United States", CA:"Canada", GB:"United Kingdom", DE:"Germany", NL:"Netherlands",
+  FR:"France", IE:"Ireland", CY:"Cyprus", CN:"China", JP:"Japan", SG:"Singapore", AU:"Australia", BR:"Brazil",
+  IN:"India", KR:"South Korea", ES:"Spain", IT:"Italy", SE:"Sweden", NO:"Norway", FI:"Finland", DK:"Denmark",
+  PL:"Poland", CH:"Switzerland", AT:"Austria", BE:"Belgium", PT:"Portugal", CR:"Costa Rica", MX:"Mexico",
+  ZA:"South Africa", KE:"Kenya", TW:"Taiwan", HK:"Hong Kong", UA:"Ukraine", TR:"Turkey", RO:"Romania",
+  BG:"Bulgaria", NZ:"New Zealand", TH:"Thailand", MY:"Malaysia", PH:"Philippines", CO:"Colombia", CL:"Chile",
+  AR:"Argentina", QA:"Qatar", EG:"Egypt", IS:"Iceland", CZ:"Czechia" };
+function regionLabel(code) { return REGION_NAMES[code] ? `${code} · ${REGION_NAMES[code]}` : (code || "—"); }
+
+function actionChip(action) {
+  const blocked = action === "blocked";
+  const c = blocked ? "--critical" : "--good";
+  return `<span class="flow-chip" style="background:color-mix(in srgb, var(${c}) 16%, transparent); color:var(${c})">${action || "—"}</span>`;
+}
+
+function breakdownCard(title, rows, colorFor, note) {
+  const total = rows.reduce((s, r) => s + r.count, 0) || 1;
+  return `
+    <div class="card">
+      <div class="card-head"><div class="card-title">${title}</div>
+        ${note ? `<span class="muted-cell" style="font-size:11px;">${note}</span>` : ""}</div>
+      <div style="padding-bottom:8px;">
+        ${rows.length === 0 ? `<div class="muted-cell" style="font-size:12px;">No data.</div>` : rows.map(r => `
+          <div class="bd-row">
+            <span class="bd-label">${r.key}</span>
+            <span class="bd-track"><span class="bd-fill" style="width:${(r.count/total*100).toFixed(1)}%; background:var(${colorFor(r.key)})"></span></span>
+            <span class="bd-val">${r.count.toLocaleString()} · ${(r.count/total*100).toFixed(1)}%</span>
+          </div>`).join("")}
+      </div>
+    </div>`;
+}
+
+function miniTableCard(title, note, headers, rows) {
+  return `
+    <div class="card" style="padding-bottom:12px;">
+      <div class="card-head"><div class="card-title">${title}</div>
+        ${note ? `<span class="muted-cell" style="font-size:11px;">${note}</span>` : ""}</div>
+      ${rows.length === 0
+        ? `<div class="muted-cell" style="font-size:12px; padding:6px 0 2px;">No data for this period.</div>`
+        : `<table><thead><tr>${headers.map(h => `<th>${h}</th>`).join("")}</tr></thead>
+           <tbody>${rows.join("")}</tbody></table>`}
+    </div>`;
+}
+
+async function loadFlowStats() {
+  const res = await fetch(`/api/flows/stats?period=${flowPeriod}&top=10`);
+  flowStats = await res.json();
+  renderFlowStats();
+}
+
+async function loadFlowsRecent() {
+  const res = await fetch(`/api/flows/recent?hours=1`);
+  flowRecent = await res.json();
+  renderFlowBreakdowns();
+  flowLogPage = 1;
+  renderFlowLog();
+}
+
+function renderFlowStats() {
+  const d = flowStats;
+  if (!d) return;
+  const total = (d.allowed || 0) + (d.blocked || 0);
+  const blockedPct = total ? (d.blocked / total * 100) : 0;
+  const label = { HOUR: "last hour", DAY: "last 24 hours", WEEK: "last 7 days" }[d.period] || d.period;
+  document.getElementById("flow-period-note").textContent = `Controller totals for the ${label}.`;
+  document.getElementById("flow-stats").innerHTML = `
+    <div class="tile"><div class="label">Total flows</div><div class="value">${total.toLocaleString()}</div><div class="sub">${label}</div></div>
+    <div class="tile"><div class="label">Allowed</div><div class="value good">${(d.allowed||0).toLocaleString()}</div><div class="sub">${total ? (100-blockedPct).toFixed(1) : "—"}% of flows</div></div>
+    <div class="tile"><div class="label">Blocked</div><div class="value ${blockedPct > 0 ? "critical" : ""}">${(d.blocked||0).toLocaleString()}</div><div class="sub">${blockedPct.toFixed(1)}% of flows</div></div>
+    <div class="tile"><div class="label">Destination regions</div><div class="value">${(d.regions||[]).length}</div><div class="sub">distinct countries</div></div>`;
+
+  // Top talkers
+  const topClients = (d.topClients||[]).map(c => `
+    <tr><td class="name-cell">${c.client_name || c.client_mac || "—"}</td>
+        <td class="mac">${c.client_mac || "—"}</td>
+        <td class="mono">${(c.count||0).toLocaleString()}</td></tr>`);
+  const topApps = (d.topApplications||[]).map(a => `
+    <tr><td class="name-cell">${a.application_name || `App #${a.application_id}`}</td>
+        <td class="muted-cell">${a.category_name || `cat ${a.category_id}`}</td>
+        <td class="mono">${fmtBytes(a.bytes)}</td></tr>`);
+  document.getElementById("flow-top-grid").innerHTML =
+    miniTableCard("Top clients by flow count", "", ["Client", "MAC", "Flows"], topClients) +
+    miniTableCard("Top applications by volume", "controller reports IDs only", ["Application", "Category", "Bytes"], topApps);
+
+  // Blocked + destinations
+  const topBlocked = (d.topBlockedClients||[]).map(c => `
+    <tr><td class="name-cell">${c.client_name || c.client_mac || "—"}</td>
+        <td class="mac">${c.client_mac || "—"}</td>
+        <td class="mono" style="color:var(--critical)">${(c.count||0).toLocaleString()}</td></tr>`);
+  const topPolicies = (d.topBlockedPolicies||[]).map(p => `
+    <tr><td class="name-cell">${p.policy_name || "—"}</td>
+        <td class="muted-cell">${p.policy_type || "—"}</td>
+        <td class="mono" style="color:var(--critical)">${(p.count||0).toLocaleString()}</td></tr>`);
+  const topDests = (d.topDestinations||[]).map(x => `
+    <tr><td class="name-cell">${x.destination || "—"}</td>
+        <td class="muted-cell">${x.most_frequent_region ? regionLabel(x.most_frequent_region) : "—"}</td>
+        <td class="mono">${(x.count||0).toLocaleString()}</td></tr>`);
+  document.getElementById("flow-policy-grid").innerHTML =
+    miniTableCard("Most blocked clients", "", ["Client", "MAC", "Blocked"], topBlocked) +
+    miniTableCard("Rules doing the blocking", "", ["Policy", "Type", "Hits"], topPolicies) +
+    miniTableCard("Top destinations", "", ["Destination", "Region", "Flows"], topDests);
+
+  // Regions
+  const regions = d.regions || [];
+  const regionTotal = regions.reduce((s, r) => s + r.total, 0) || 1;
+  document.getElementById("flow-region-count").textContent = regions.length;
+  document.getElementById("flow-region-tbody").innerHTML = regions.length === 0
+    ? `<tr class="empty-row"><td colspan="4">No region data for this period.</td></tr>`
+    : regions.slice(0, 25).map(r => `
+      <tr>
+        <td class="name-cell">${regionLabel(r.region)}</td>
+        <td class="mono">${r.total.toLocaleString()}</td>
+        <td><div class="util-bar"><div class="util-track"><div class="util-fill" style="width:${Math.max(1, r.total/regionTotal*100).toFixed(1)}%; background:var(--slot-1)"></div></div><span class="util-pct">${(r.total/regionTotal*100).toFixed(1)}%</span></div></td>
+        <td class="mono" style="color:${r.blocked ? "var(--critical)" : "var(--text-muted)"}">${r.blocked.toLocaleString()}</td>
+      </tr>`).join("");
+}
+
+function renderFlowBreakdowns() {
+  const d = flowRecent;
+  if (!d) return;
+  const note = `sample of ${d.sampleSize.toLocaleString()} newest flows`;
+  const actionColor = k => k === "blocked" ? "--critical" : "--good";
+  const protoColor = k => ({ TCP: "--slot-1", UDP: "--slot-3", ICMP: "--slot-4" })[k] || "--slot-7";
+  const dirColor = k => ({ outgoing: "--slot-1", local: "--slot-5", incoming: "--slot-2" })[k] || "--slot-7";
+  document.getElementById("flow-breakdowns").innerHTML =
+    breakdownCard("By action", d.byAction, actionColor, note) +
+    breakdownCard("By protocol", d.byProtocol, protoColor, note) +
+    breakdownCard("By direction", d.byDirection, dirColor, note) +
+    breakdownCard("By service", (d.byService || []).slice(0, 8), () => "--slot-7", note);
+}
+
+function renderFlowLog() {
+  const d = flowRecent;
+  if (!d) return;
+  const q = flowLogState.search.trim().toLowerCase();
+  let rows = d.flows || [];
+  if (flowLogState.action) rows = rows.filter(f => f.action === flowLogState.action);
+  if (flowLogState.dir) rows = rows.filter(f => f.direction === flowLogState.dir);
+  if (q) rows = rows.filter(f => `${f.srcName||""} ${f.srcIp||""} ${f.srcMac||""} ${f.srcNetwork||""} ${f.dstName||""} ${f.dstIp||""} ${f.dstMac||""} ${f.dstNetwork||""} ${(f.domains||[]).join(" ")} ${(f.policies||[]).join(" ")} ${f.service||""}`.toLowerCase().includes(q));
+
+  const filtered = q || flowLogState.action || flowLogState.dir;
+  document.getElementById("flow-log-count").textContent =
+    filtered ? `${rows.length} of ${d.flows.length}` : d.flows.length;
+  document.getElementById("flow-log-note").textContent =
+    `Newest ${d.sampleSize.toLocaleString()} flows from the last hour — the controller caps this list, so counts here are a sample, not the period totals above.`;
+
+  const tbody = document.getElementById("flow-log-tbody");
+  if (rows.length === 0) {
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="9">No flows match this filter.</td></tr>`;
+    renderPaginationControls(document.getElementById("flow-log-pagination"), 1, 1, () => {});
+    return;
+  }
+  const { pageRows, totalPages, clampedPage } = paginate(rows, flowLogPage);
+  flowLogPage = clampedPage;
+  const ep = (name, ip, net) => `
+    <div class="flow-ep">
+      <span class="ep-name">${name || ip || "—"}</span>
+      <span class="ep-sub">${ip || ""}${net ? ` · ${net}` : ""}</span>
+    </div>`;
+  tbody.innerHTML = pageRows.map(f => `
+    <tr>
+      <td class="mono muted-cell">${f.time ? new Date(f.time).toLocaleTimeString(undefined, {hour:"numeric", minute:"2-digit", second:"2-digit"}) : "—"}</td>
+      <td>${actionChip(f.action)}</td>
+      <td>${ep(f.srcName, f.srcIp, f.srcNetwork)}</td>
+      <td>${ep(f.dstName, f.dstIp, f.dstNetwork)}${(f.domains||[]).length ? `<div class="flow-dom">${f.domains.slice(0,2).join(", ")}</div>` : ""}</td>
+      <td class="muted-cell">${f.service || "—"}</td>
+      <td class="mono muted-cell">${f.protocol || "—"}</td>
+      <td class="muted-cell">${f.direction || "—"}</td>
+      <td class="mono">${f.bytesTotal != null ? fmtBytes(f.bytesTotal) : "—"}</td>
+      <td class="muted-cell">${(f.policies||[]).join(", ") || "—"}</td>
+    </tr>`).join("");
+  renderPaginationControls(document.getElementById("flow-log-pagination"), flowLogPage, totalPages,
+    p => { flowLogPage = p; renderFlowLog(); });
+}
+
+document.getElementById("flowPeriodSeg").addEventListener("click", e => {
+  const btn = e.target.closest(".seg-btn2");
+  if (!btn) return;
+  flowPeriod = btn.dataset.period;
+  document.querySelectorAll("#flowPeriodSeg .seg-btn2").forEach(b => b.classList.toggle("active", b === btn));
+  loadFlowStats();
+});
+document.getElementById("flowActionSeg").addEventListener("click", e => {
+  const btn = e.target.closest(".seg-btn2");
+  if (!btn) return;
+  flowLogState.action = btn.dataset.action;
+  document.querySelectorAll("#flowActionSeg .seg-btn2").forEach(b => b.classList.toggle("active", b === btn));
+  flowLogPage = 1; renderFlowLog();
+});
+document.getElementById("flowDirSeg").addEventListener("click", e => {
+  const btn = e.target.closest(".seg-btn2");
+  if (!btn) return;
+  flowLogState.dir = btn.dataset.dir;
+  document.querySelectorAll("#flowDirSeg .seg-btn2").forEach(b => b.classList.toggle("active", b === btn));
+  flowLogPage = 1; renderFlowLog();
+});
+document.getElementById("flow-search").addEventListener("input", e => {
+  flowLogState.search = e.target.value; flowLogPage = 1; renderFlowLog();
+});
+
+// ============================================================
+// INIT
+// ============================================================
+clBuildHead();
+setupDeviceTableSort();
+// Everything that colours or filters by network needs NETWORKS populated
+// first, so the network list is fetched before the rest of init kicks off.
+// A failure here is non-fatal: names still render, just without VLAN colours.
+loadNetworks().catch(e => console.warn("network list unavailable", e)).finally(() => {
+  connectWs();
+  loadWanChart();
+  loadSpeedtest();
+  loadWanUsage();
+  loadRttMonitors();
+  loadFlowStats();
+  loadFlowsRecent();
+  loadHealth();
+  loadWifiHealth();
+  loadFirewall();
+  loadRouting();
+  loadConfig();
+  loadClientUsage("7d");
+  loadApUsage("7d");
+  loadVlanSummary();
+  loadVlanChart();
+  loadNeighbors();
+  loadClients();
+});
+setInterval(loadWanChart, 60000);
+setInterval(loadSpeedtest, 60000);
+setInterval(loadWanUsage, 60000);
+setInterval(loadRttMonitors, 60000); // matches the persist cadence
+// Flows are expensive controller queries (thousands of rows); the backend
+// memoises them for 30s, so refreshing slower than that is deliberate.
+setInterval(loadFlowStats, 60000);
+setInterval(loadFlowsRecent, 60000);
+setInterval(loadHealth, 60000);
+setInterval(loadWifiHealth, 60000);
+// Firewall config changes rarely -- refresh far slower than the live tiers.
+setInterval(loadFirewall, 300000);
+setInterval(loadRouting, 300000);
+setInterval(loadConfig, 300000);
+setInterval(loadVlanSummary, 60000);
+setInterval(loadVlanChart, 60000);
+setInterval(() => { if (expandedVlan) loadVlanDetail(expandedVlan); }, 30000);
+setInterval(() => { if (openApRow) { const [mac, band] = openApRow.split("|"); loadApDrill(mac, band, openApRow); } }, 30000);
+</script>
+</body>
+</html>

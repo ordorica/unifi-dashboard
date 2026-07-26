@@ -1,0 +1,22 @@
+# ---------------------------------------------------------------------------
+# Real network data. NEVER commit these -- unifi_clients.db and the logs contain
+# live client MAC addresses, hostnames and IPs. Once in git history they are
+# effectively permanent (GitHub keeps unreferenced objects reachable after a
+# force-push), and unlike a credential a MAC address cannot be rotated.
+# ---------------------------------------------------------------------------
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# Live controller username/password, read by unifi_lib/fetch.py at runtime.
+# .env.example is committed; .env is not.
+.env
+
+# Local bind-mount target used when running the container during development.
+data/
+
+__pycache__/
+*.py[cod]
+
+.DS_Store
