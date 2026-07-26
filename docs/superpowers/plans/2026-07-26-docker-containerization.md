@@ -552,7 +552,17 @@ sqlite3 data/unifi_clients.db "select name from sqlite_master where type='table'
 sqlite3 data/unifi_clients.db "select count(*) from clients;"
 ```
 
-Expected: `unifi_clients.db` **plus `unifi_clients.db-wal` and `-shm`** on the host, owned by uid 1000; tables present; a non-zero client count. If the `-wal` file is missing, the mount is wrong.
+Expected: `unifi_clients.db` **plus `unifi_clients.db-wal` and `-shm`** on the
+host; tables present; a non-zero client count. If the `-wal` file is missing,
+the mount is wrong.
+
+**Ownership on macOS will not read as 1000, and that is correct here.** Docker
+Desktop's VirtioFS remaps bind-mount ownership to whichever user the container
+runs as, so `ls -la data/` on the host shows *your* uid (501) while
+`docker compose exec` shows `1000`. Both are expected. Verified empirically:
+an in-container `chown` does not change host-visible ownership, and a uid-1000
+process can write to a host directory owned by 501. Ownership is only actually
+enforced on the Linux NAS — Task 5 Step 1 is where it matters.
 
 - [ ] **Step 7: Confirm data survives a restart**
 
@@ -573,27 +583,27 @@ docker inspect --format '{{.State.Health.Status}}' unifi-dashboard
 
 Expected: `healthy`.
 
-- [ ] **Step 9: Permission failure drill**
+- [ ] **Step 9: Permission failure drill — NOT PERFORMABLE ON macOS. Skip it.**
 
-The most common Synology deployment failure, rehearsed here where it is cheap:
+This step originally rehearsed the most common Synology deployment failure by
+chowning the data directory to the wrong uid. **It cannot work on this machine
+and must not be attempted.** Two independent reasons, both verified rather than
+assumed:
 
-```bash
-docker compose down
-sudo chown -R 65534:65534 data/          # deliberately wrong owner
-docker compose up -d && sleep 15
-docker compose logs --tail 30 | grep -iE "permission|readonly|unable to open" | head -5
-```
+1. **macOS masks the failure.** Docker Desktop's VirtioFS remaps bind-mount
+   ownership to the container's user. A probe container running as uid 1000
+   wrote successfully to a host directory owned by `501:0`, and an
+   in-container `chown -R 65534:65534` left host ownership unchanged at
+   `501:0`. The drill would report success regardless of what it was given —
+   a rehearsal that always passes is worse than none, because it manufactures
+   false confidence in exactly the check meant to catch this.
+2. **`sudo` requires a password here** (`sudo -n true` fails), and a
+   non-interactive agent cannot answer the prompt.
 
-Expected: a clear permission error mentioning the database — **not** silent success and not corruption. Record the exact message; it is what you will see on the NAS if the `chown` is missed. Then restore:
-
-```bash
-docker compose down
-sudo chown -R "$(id -u):$(id -g)" data/
-docker compose up -d && sleep 20
-docker inspect --format '{{.State.Health.Status}}' unifi-dashboard
-```
-
-Expected: `healthy` again.
+The concern is real; only the venue is wrong. It moves to **Task 5 Step 1**,
+where the filesystem is Linux and ownership is genuinely enforced. Do not
+substitute a different local approximation — record in the task report that
+this verification is deferred to the NAS, and why.
 
 - [ ] **Step 10: Stop the local container and commit**
 
@@ -611,8 +621,11 @@ growth, since the app already logs to stdout.
 Verified locally against the live controller on port 8788 alongside the
 running launchd instance: full persist_loop and slow_loop cycle with no
 errors, WAL sidecars present on the host mount, data surviving a restart,
-healthcheck green, and a deliberate wrong-owner drill producing a clear
-permission error rather than corruption.
+and healthcheck green.
+
+Bind-mount ownership enforcement is deliberately NOT verified here --
+Docker Desktop's VirtioFS remaps it on macOS, so any local check would
+pass regardless of input. That verification lives on the Linux NAS.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
@@ -745,10 +758,24 @@ Over SSH to the NAS:
 ```bash
 sudo mkdir -p /volume1/docker/unifi-dashboard/data
 sudo chown -R 1000:1000 /volume1/docker/unifi-dashboard/data
-uname -m    # record: x86_64 or aarch64
+ls -lan /volume1/docker/unifi-dashboard          # must show 1000 1000
+uname -m                                          # record: x86_64 or aarch64
 ```
 
 `/volume1` must be the NAS's own storage. Do not use a mounted NFS/SMB share — SQLite WAL will corrupt on one.
+
+**This `chown` is load-bearing and is the one thing that could not be rehearsed
+locally.** Task 3 Step 9 was skipped because Docker Desktop's VirtioFS remaps
+bind-mount ownership on macOS, making the failure unreproducible there. Linux
+enforces it for real, so getting this wrong here produces the failure the drill
+was meant to make familiar.
+
+If the `chown` is missed, the container starts and then fails on first write
+with a SQLite error along the lines of `unable to open database file` or
+`attempt to write a readonly database`. If you see that, the fix is this
+`chown` — not a code or image problem. Confirm ownership took effect with the
+`ls -lan` above **before** starting the container, rather than diagnosing it
+from logs afterwards.
 
 - [ ] **Step 2: Authenticate to ghcr.io**
 
