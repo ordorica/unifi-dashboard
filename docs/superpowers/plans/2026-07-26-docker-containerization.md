@@ -124,7 +124,32 @@ Note the last check: a container with no credentials must crash at startup rathe
 chmod +x scratch_verify_env.sh && ./scratch_verify_env.sh
 ```
 
-Expected: the three "default/unchanged" checks PASS (nothing has changed yet); "UNIFI_DB_PATH honored", "bind overridable", "env wins", and "absent settings file tolerated" FAIL. If "still fails loudly" fails, stop — that means the current `RuntimeError` guard is already broken.
+Expected: **3 passed, 5 failed.**
+
+Passing before any change — the three checks that assert today's behaviour is
+intact:
+
+1. `db: default path unchanged`
+2. `server: default bind unchanged`
+3. `fetch: settings.local.json still used`
+
+Failing before the change, all five for the same reason — the feature does not
+exist yet: "db: UNIFI_DB_PATH honored", "server: bind overridable", "fetch: env
+wins over settings file", "fetch: absent settings file tolerated", and "fetch:
+still fails loudly when nothing is set".
+
+That last one deserves a note, because its failure mode looks alarming and is
+not. It raises `FileNotFoundError`, not `RuntimeError`: the current
+`load_config()` calls `SETTINGS_FILE.read_text()` with no guard, so pointing
+`SETTINGS_FILE` at a nonexistent path explodes inside `load_config()` before
+`UnifiSession.__init__`'s `RuntimeError` guard is ever reached. It is a
+post-change assertion — Step 5's `_settings_env()` adds the `try/except` that
+lets the `RuntimeError` guard become the thing that fires. Seeing
+`FileNotFoundError` here **before** Step 5 is correct and expected; seeing it
+**after** Step 5 is a real failure.
+
+If the pre-change run does not show exactly 3 passed / 5 failed, stop and
+report — the starting state is not what this plan assumes.
 
 - [ ] **Step 3: Make the bind address configurable**
 
