@@ -46,15 +46,30 @@ Create `scratch_verify_env.sh` (temporary, deleted in Step 8):
 #!/usr/bin/env bash
 # Verification for Task 1. Not committed.
 #
-# Each check sets its environment *inside* Python, before the import that
-# reads it. DB_FILE, HOST and PORT are all evaluated at import time, so this
-# works -- and it avoids `VAR=x shell_function`, whose persistence semantics
-# differ between bash modes and would let env bleed between checks.
+# HERMETIC BY CONSTRUCTION. Every check first deletes all UNIFI_* and BIND_*
+# variables from os.environ, because this machine has real UNIFI_NETWORK_*
+# credentials injected ambiently into every shell by the unifi-network MCP
+# plugin. Without that clearing, two checks pass for the wrong reason:
+# "settings.local.json still used" reads the environment rather than the
+# file, and "fails loudly when nothing is set" finds credentials and builds
+# a session instead of raising.
+#
+# Clearing must precede the import in each snippet: DB_FILE, HOST and PORT
+# are evaluated at import time. load_config() reads os.environ at call time,
+# so clearing before the call is sufficient there.
+#
+# Setting env inside Python (rather than `VAR=x shell_function`) also avoids
+# bash's mode-dependent assignment-persistence semantics, which would let env
+# bleed between checks.
 set -u
 RUN="uv run --python 3.14 --with unifi-core --with aiounifi python3"
+PRE='import os
+for _k in [k for k in os.environ if k.startswith(("UNIFI_", "BIND_"))]:
+    del os.environ[_k]
+'
 pass=0; fail=0
 check() {
-  if out=$($RUN -c "$2" 2>&1); then echo "PASS  $1"; pass=$((pass+1))
+  if out=$($RUN -c "$PRE$2" 2>&1); then echo "PASS  $1"; pass=$((pass+1))
   else echo "FAIL  $1"; echo "$out" | tail -3 | sed 's/^/      /'; fail=$((fail+1)); fi
 }
 
@@ -64,7 +79,7 @@ assert db.DB_FILE.name == "unifi_clients.db", db.DB_FILE
 assert db.DB_FILE.parent.name == ".unifi-dashboard", db.DB_FILE'
 
 check "db: UNIFI_DB_PATH honored" '
-import os; os.environ["UNIFI_DB_PATH"] = "/tmp/t.db"
+os.environ["UNIFI_DB_PATH"] = "/tmp/t.db"
 from unifi_lib import db
 assert str(db.DB_FILE) == "/tmp/t.db", db.DB_FILE'
 
@@ -73,18 +88,19 @@ import live_server as s
 assert (s.HOST, s.PORT) == ("127.0.0.1", 8787), (s.HOST, s.PORT)'
 
 check "server: bind overridable" '
-import os; os.environ["BIND_HOST"] = "0.0.0.0"; os.environ["BIND_PORT"] = "9999"
+os.environ["BIND_HOST"] = "0.0.0.0"; os.environ["BIND_PORT"] = "9999"
 import live_server as s
 assert (s.HOST, s.PORT) == ("0.0.0.0", 9999), (s.HOST, s.PORT)
 assert isinstance(s.PORT, int), type(s.PORT)'
 
+# With UNIFI_* cleared above, this genuinely exercises the settings.local.json
+# fallback -- it cannot be satisfied by the ambient environment.
 check "fetch: settings.local.json still used" '
 from unifi_lib.fetch import load_config
 c = load_config()
 assert c["host"] and c["username"] and c["password"], c'
 
 check "fetch: env wins over settings file" '
-import os
 os.environ.update(UNIFI_NETWORK_HOST="1.2.3.4", UNIFI_NETWORK_USERNAME="u",
                   UNIFI_NETWORK_PASSWORD="p")
 from unifi_lib.fetch import load_config
@@ -93,7 +109,6 @@ assert c["host"] == "1.2.3.4", c["host"]
 assert c["username"] == "u" and c["password"] == "p", c'
 
 check "fetch: absent settings file tolerated" '
-import os
 os.environ.update(UNIFI_NETWORK_HOST="1.2.3.4", UNIFI_NETWORK_USERNAME="u",
                   UNIFI_NETWORK_PASSWORD="p")
 from pathlib import Path
