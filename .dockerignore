@@ -1,0 +1,23 @@
+# Live network data and credentials -- must never enter the build context.
+*.db
+*.db-wal
+*.db-shm
+*.log
+.env
+data/
+
+# Not needed at runtime.
+.git/
+.github/
+docs/
+.superpowers/
+# NOTE the leading **/. Unlike .gitignore, .dockerignore matches patterns
+# against the context root only, so a bare `__pycache__/` would exclude
+# ./__pycache__ but NOT ./unifi_lib/__pycache__.
+**/__pycache__/
+**/*.py[cod]
+.DS_Store
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml
