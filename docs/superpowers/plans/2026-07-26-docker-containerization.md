@@ -306,8 +306,12 @@ data/
 .git/
 .github/
 docs/
-__pycache__/
-*.py[cod]
+.superpowers/
+# NOTE the leading **/. Unlike .gitignore, .dockerignore matches patterns
+# against the context root only, so a bare `__pycache__/` would exclude
+# ./__pycache__ but NOT ./unifi_lib/__pycache__.
+**/__pycache__/
+**/*.py[cod]
 .DS_Store
 .gitignore
 .dockerignore
@@ -379,9 +383,14 @@ Expected: build succeeds, and the build context reports **kilobytes, not ~234 MB
 ```bash
 echo "--- /app contents ---"
 docker run --rm --entrypoint sh unifi-dashboard:local -c 'ls -la /app /app/unifi_lib'
-echo "--- any db/log/env anywhere in the image? ---"
+echo "--- any db/env/settings anywhere in the image? ---"
+# /var/log is excluded deliberately: the Debian base image ships its own
+# apt/dpkg logs, which are not ours and would be false positives.
 docker run --rm --entrypoint sh unifi-dashboard:local -c \
-  'find / -xdev \( -name "*.db" -o -name "*.log" -o -name "settings.local.json" -o -name ".env" \) 2>/dev/null | head'
+  'find / -xdev -path /var/log -prune -o \( -name "*.db" -o -name "settings.local.json" -o -name ".env" \) -print 2>/dev/null | head'
+echo "--- no compiled bytecode should have been copied in ---"
+docker run --rm --entrypoint sh unifi-dashboard:local -c \
+  'find /app \( -name "__pycache__" -o -name "*.pyc" \) | head'
 echo "--- layer sizes ---"
 docker history unifi-dashboard:local --format '{{.Size}}\t{{.CreatedBy}}' | head -15
 echo "--- baked-in secrets? ---"
