@@ -256,9 +256,13 @@ the NAS, and any compromised machine — can load the full dashboard, which expo
 client inventory, firewall policies, VPN configuration, traffic flows, and WiFi
 topology.
 
-If this is revisited, the cheapest tightening is DSM → Security → Firewall,
-restricting port `8787` to a trusted subnet. That requires no change to the image or
-compose file beyond the port mapping.
+If this is revisited, note that a DSM → Security → Firewall rule restricting port
+`8787` may not actually take effect: Docker publishes ports via DNAT rules that
+commonly bypass the DSM firewall's INPUT chain, so the container can remain reachable
+regardless of the DSM rule. The dependable alternatives are binding the published
+port to the NAS loopback in `docker-compose.yml` (e.g.
+`127.0.0.1:${HOST_PORT}:${BIND_PORT}`) and fronting it with something authenticated,
+or using a VPN/Tailscale overlay instead of a LAN-facing port at all.
 
 ## Section 5 — Verification and rollback
 

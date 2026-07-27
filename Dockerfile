@@ -29,6 +29,10 @@ EXPOSE 8787
 
 # `/` serves the static HTML with no controller round-trip, so this stays cheap.
 # python:3.14-slim ships neither curl nor wget; urllib avoids adding a package.
+# This is a liveness probe for the HTTP server only, not a check of controller
+# connectivity: if the UniFi controller session dies permanently, the background
+# loops will log errors and retry forever while `/` keeps returning 200, so the
+# container stays "healthy" while serving stale data.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD ["python", "-c", "import os,sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('BIND_PORT','8787') + '/', timeout=4).status == 200 else 1)"]
 

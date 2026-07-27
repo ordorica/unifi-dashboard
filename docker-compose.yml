@@ -1,6 +1,11 @@
 services:
   unifi-dashboard:
     image: ${IMAGE:-unifi-dashboard:local}
+    # `build:` is here so local development can run `docker compose up -d --build`.
+    # On the NAS, only this file and .env are present — there is no Dockerfile or
+    # source tree — so a bare `docker compose up -d` there would try to build and
+    # fail with a confusing context error. Always run `docker compose pull` before
+    # `docker compose up -d` on the NAS.
     build: .
     container_name: unifi-dashboard
     restart: unless-stopped
