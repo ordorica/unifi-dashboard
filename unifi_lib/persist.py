@@ -46,12 +46,6 @@ DEVICE_CATEGORY_BY_TYPE = {
     "usw": "switch", "uap": "ap", "umbb": "cellular_gateway",
 }
 
-# Empirically: our primary WAN speedtests run <=21ms latency, the T-Mobile
-# 5G failover always lands >=27ms -- no API field distinguishes the two, so
-# this threshold (picked in the gap between the two clusters) is a heuristic,
-# not an authoritative source tag.
-CELLULAR_LATENCY_THRESHOLD_MS = 24
-
 
 def as_ipv4(value) -> str | None:
     return value if isinstance(value, str) and IPV4_RE.match(value) else None
@@ -411,7 +405,34 @@ def _persist_ap_radios(db, raw, mac, ts):
         )
 
 
+def record_speedtest_observation(db: sqlite3.Connection, raw: dict, ts: str) -> bool:
+    """Record a completed speedtest seen in the gateway's live status.
+
+    speedtest-status names the interface the test ran on -- the only
+    authoritative attribution the controller offers. It is a single latest
+    value, so it must be sampled often enough to catch back-to-back tests.
+    Returns True when this reading was not already recorded.
+    """
+    st = raw.get("speedtest-status") or {}
+    ifname, down, up = st.get("interface_name"), st.get("xput_download"), st.get("xput_upload")
+    if not ifname or down is None or up is None:
+        return False
+    cur = db.execute(
+        "INSERT OR IGNORE INTO speedtest_observations (observed_at, ifname, xput_download, "
+        "xput_upload) VALUES (?, ?, ?, ?)",
+        (ts, ifname, down, up),
+    )
+    return cur.rowcount > 0
+
+
 def persist_speedtests(db: sqlite3.Connection, speedtests: list[dict]) -> int:
+    """Insert archived speedtests, attributing each to a WAN Path when possible.
+
+    The archive carries no WAN field, so attribution comes from matching an
+    observed speedtest-status reading on exact throughput. Anything that
+    cannot be matched stays NULL -- the controller genuinely does not record
+    which WAN ran the test, and guessing is what this replaced.
+    """
     inserted = 0
     for st in speedtests:
         ts_ms = st.get("time")
@@ -420,11 +441,16 @@ def persist_speedtests(db: sqlite3.Connection, speedtests: list[dict]) -> int:
         down, up, lat = st.get("xput_download"), st.get("xput_upload"), st.get("latency")
         if not down and not up:
             continue  # zero-value glitch rows the controller occasionally logs
-        source = "cellular" if (lat or 0) >= CELLULAR_LATENCY_THRESHOLD_MS else "primary"
+        row = db.execute(
+            "SELECT p.id FROM speedtest_observations o "
+            "JOIN wan_paths p ON p.ifname = o.ifname "
+            "WHERE o.xput_download = ? AND o.xput_upload = ?",
+            (down, up),
+        ).fetchone()
         cur = db.execute(
-            "INSERT OR IGNORE INTO speedtests (ts, download_mbps, upload_mbps, latency_ms, source) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (epoch_to_iso(ts_ms / 1000), down, up, lat, source),
+            "INSERT OR IGNORE INTO speedtests (ts, download_mbps, upload_mbps, latency_ms, "
+            "wan_path_id) VALUES (?, ?, ?, ?, ?)",
+            (epoch_to_iso(ts_ms / 1000), down, up, lat, row[0] if row else None),
         )
         inserted += cur.rowcount
     return inserted

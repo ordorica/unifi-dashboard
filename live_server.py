@@ -64,6 +64,7 @@ class State:
         self.vendor_cache: dict[str, str] = {}  # mac -> vendor, refreshed each persist cycle
         self.flow_cache: dict[str, tuple[float, object]] = {}  # key -> (fetched_at, payload)
         self.last_rogue_history: float = 0.0  # monotonic clock of last history append
+        self.last_speedtest_seen: dict[str, tuple] = {}  # gateway mac -> (ifname, down, up)
 
 
 state = State()
@@ -296,6 +297,27 @@ async def fast_loop():
             }
             state.latest_tick = tick
             await broadcast(tick)
+
+            # Attribute speedtests by observation: speedtest-status names the
+            # interface a completed test ran on, but it's a single latest
+            # value refreshed on every poll (not a completion event), and
+            # tests pair up ~18-109s apart -- a 60s poll would miss half of
+            # them. Sampling here (already fetched, no extra API cost) and
+            # only opening a connection when the reading actually changes
+            # keeps this cheap at 1s cadence.
+            for raw in fast["devices"]:
+                if persist.device_category(raw) not in ("gateway", "cellular_gateway"):
+                    continue
+                st = raw.get("speedtest-status") or {}
+                seen = (st.get("interface_name"), st.get("xput_download"), st.get("xput_upload"))
+                if seen[0] is None or seen == state.last_speedtest_seen.get(raw.get("mac")):
+                    continue
+                state.last_speedtest_seen[raw.get("mac")] = seen
+                conn = db.connect()
+                if persist.record_speedtest_observation(conn, raw, persist.now_iso()):
+                    log.info("speedtest observed on %s: %s/%s Mbps", seen[0], seen[1], seen[2])
+                conn.commit()
+                conn.close()
         except Exception:
             log.exception("fast_loop tick failed")
         await asyncio.sleep(FAST_INTERVAL)
