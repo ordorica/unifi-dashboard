@@ -395,6 +395,17 @@ Implements the matching rule from `docs/adr/0001-wan-path-identity.md`.
 
 - [ ] **Step 1: Write the module**
 
+> **⚠️ The code in this step and the checks in Step 2 are SUPERSEDED.** They use
+> the per-path `resolve_path_id(db, mac, path, ts)` signature, which was found
+> during implementation to merge two paths sharing an ASN — see the Interfaces
+> note above and ADR 0001. The shipped module exposes
+> `resolve_path_ids(db, gateway_mac, paths, ts) -> list[int]` and resolves a
+> gateway's paths as a batch. Read the code below for the *matching rule*, which
+> is unchanged; take the *signature* from the Interfaces note. Step 2's checks
+> must additionally cover a fresh gateway whose first two paths share an ASN —
+> the case the original script missed, because by the time it reached its
+> duplicate-ISP checks the gateway already had three paths.
+
 ```python
 """Assign each observed WAN Path a stable synthetic identity.
 
