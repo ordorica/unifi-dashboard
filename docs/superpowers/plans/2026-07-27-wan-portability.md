@@ -381,7 +381,15 @@ idempotent and safe against the existing 240MB production database."
 
 **Interfaces:**
 - Consumes: `WanPath` from `unifi_lib.wan` (Task 1); `wan_paths` table (Task 2).
-- Produces: `resolve_path_id(db, gateway_mac: str, path: WanPath, ts: str) -> int`. Tasks 4 and 6 call it.
+- Produces: `resolve_path_ids(db, gateway_mac: str, paths: list[WanPath], ts: str) -> list[int]`, returning ids positionally aligned with `paths`. Task 4 calls it.
+
+**The interface is batch, not per-path, and that is load-bearing.** Two WAN Paths
+sharing an ASN can only be told apart by knowing which candidate rows have
+already been claimed *in this same cycle*. A per-path signature cannot know that:
+resolving the second path sees the first as a lone, uncorroborated ASN match and
+merges into it — the irreversible failure ADR 0001 exists to prevent. Within one
+call, an id claimed by an earlier path in the batch is removed from the candidate
+pool for every later one.
 
 Implements the matching rule from `docs/adr/0001-wan-path-identity.md`.
 
@@ -557,7 +565,7 @@ def persist_wan_stats(db: sqlite3.Connection, devices: list[dict], ts: str) -> i
     _usage_since() can difference them; rates are instantaneous.
     """
     from .wan import discover_wan_paths
-    from .wan_identity import resolve_path_id
+    from .wan_identity import resolve_path_ids
 
     written = 0
     for raw in devices:
@@ -566,8 +574,11 @@ def persist_wan_stats(db: sqlite3.Connection, devices: list[dict], ts: str) -> i
         mac = raw.get("mac")
         if not mac:
             continue
-        for path in discover_wan_paths(raw):
-            path_id = resolve_path_id(db, mac, path, ts)
+        # Resolve the whole gateway's paths at once: two paths sharing an ISP
+        # can only be distinguished by knowing which rows this cycle already
+        # claimed. See Task 3's interface note and ADR 0001.
+        paths = discover_wan_paths(raw)
+        for path, path_id in zip(paths, resolve_path_ids(db, mac, paths, ts)):
             wan = raw.get(path.slot) or {}
             rx_r, tx_r = _f(wan.get("rx_bytes-r")), _f(wan.get("tx_bytes-r"))
             db.execute(
