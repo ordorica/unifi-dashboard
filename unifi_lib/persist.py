@@ -411,7 +411,11 @@ def record_speedtest_observation(db: sqlite3.Connection, raw: dict, ts: str) -> 
     speedtest-status names the interface the test ran on -- the only
     authoritative attribution the controller offers. It is a single latest
     value, so it must be sampled often enough to catch back-to-back tests.
-    Returns True when this reading was not already recorded.
+    The gateway's own MAC is recorded alongside it so attribution can be
+    scoped per gateway -- two gateways can report the same ifname, and a
+    replaced gateway's wan_paths rows are never pruned, so ifname alone is
+    not a safe join key. Returns True when this reading was not already
+    recorded.
     """
     st = raw.get("speedtest-status") or {}
     ifname, down, up = st.get("interface_name"), st.get("xput_download"), st.get("xput_upload")
@@ -419,8 +423,8 @@ def record_speedtest_observation(db: sqlite3.Connection, raw: dict, ts: str) -> 
         return False
     cur = db.execute(
         "INSERT OR IGNORE INTO speedtest_observations (observed_at, ifname, xput_download, "
-        "xput_upload) VALUES (?, ?, ?, ?)",
-        (ts, ifname, down, up),
+        "xput_upload, gateway_mac) VALUES (?, ?, ?, ?, ?)",
+        (ts, ifname, down, up, raw.get("mac")),
     )
     return cur.rowcount > 0
 
@@ -429,9 +433,13 @@ def persist_speedtests(db: sqlite3.Connection, speedtests: list[dict]) -> int:
     """Insert archived speedtests, attributing each to a WAN Path when possible.
 
     The archive carries no WAN field, so attribution comes from matching an
-    observed speedtest-status reading on exact throughput. Anything that
-    cannot be matched stays NULL -- the controller genuinely does not record
-    which WAN ran the test, and guessing is what this replaced.
+    observed speedtest-status reading on exact throughput. The join is
+    scoped by gateway_mac as well as ifname -- two gateways can share an
+    ifname, and wan_paths rows are never pruned, so ifname alone can match
+    the wrong (possibly decommissioned) gateway's path. Observations
+    recorded before gateway_mac existed have it NULL and will not match
+    here; that is correct, not a regression -- an unattributable speedtest
+    stays NULL rather than being guessed, which is what this replaced.
     """
     inserted = 0
     for st in speedtests:
@@ -443,7 +451,7 @@ def persist_speedtests(db: sqlite3.Connection, speedtests: list[dict]) -> int:
             continue  # zero-value glitch rows the controller occasionally logs
         row = db.execute(
             "SELECT p.id FROM speedtest_observations o "
-            "JOIN wan_paths p ON p.ifname = o.ifname "
+            "JOIN wan_paths p ON p.ifname = o.ifname AND p.gateway_mac = o.gateway_mac "
             "WHERE o.xput_download = ? AND o.xput_upload = ?",
             (down, up),
         ).fetchone()

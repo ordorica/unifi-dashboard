@@ -336,6 +336,18 @@ def init_db(db: sqlite3.Connection) -> None:
         """
     )
 
+    # Migration: scope observations to the gateway that produced them.
+    # Multi-gateway networks can have two gateways report the same ifname
+    # (e.g. both a eth9), and wan_paths is deliberately never pruned, so a
+    # replaced gateway's rows persist alongside its replacement's -- without
+    # this, attribution's join on ifname alone can match the wrong gateway's
+    # WAN Path. Not part of the primary key: widening the PK would require
+    # rebuilding the table, breaking the additive-migration rule, and the
+    # PK's job is re-observation idempotence, not join scoping.
+    existing_obs_cols = {row[1] for row in db.execute("PRAGMA table_info(speedtest_observations)").fetchall()}
+    if "gateway_mac" not in existing_obs_cols:
+        db.execute("ALTER TABLE speedtest_observations ADD COLUMN gateway_mac TEXT")
+
     db.commit()
 
 
