@@ -1,9 +1,9 @@
 # Live network data and credentials -- must never enter the build context.
-*.db
-*.db-wal
-*.db-shm
-*.log
-.env
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.log
+**/.env
 data/
 
 # Not needed at runtime.

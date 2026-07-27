@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hector.unifi-live-monitor</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/uv</string>
+        <string>run</string>
+        <string>--python</string>
+        <string>3.14</string>
+        <string>--with</string>
+        <string>unifi-core</string>
+        <string>--with</string>
+        <string>aiounifi</string>
+        <string>python3</string>
+        <string>/Users/hector/Projects/.unifi-dashboard/live_server.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/hector/Projects/.unifi-dashboard</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/hector/Projects/.unifi-dashboard/live_server.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/hector/Projects/.unifi-dashboard/live_server.log</string>
+</dict>
+</plist>

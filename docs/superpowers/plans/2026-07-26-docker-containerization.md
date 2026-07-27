@@ -979,7 +979,7 @@ git push
 
 ## Rollback
 
-Free through Task 5. The launchd instance runs untouched until Task 6 Step 1, so at any earlier point: `docker compose down` on the NAS and the Mac keeps serving. After Task 6, rolling back means restoring the plist from git history (`git show 8716c49`) and reloading it with `launchctl bootstrap`.
+Free through Task 5. The launchd instance runs untouched until Task 6 Step 1, so at any earlier point: `docker compose down` on the NAS and the Mac keeps serving. After Task 6, rolling back means restoring the plist committed at `deploy/com.hector.unifi-live-monitor.plist` (a copy of the launchd job definition, kept in the repo specifically so this rollback path exists after Task 6 deletes the live copy) to `~/Library/LaunchAgents/com.hector.unifi-live-monitor.plist` and loading it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hector.unifi-live-monitor.plist`.
 
 ## Notes on verification
 

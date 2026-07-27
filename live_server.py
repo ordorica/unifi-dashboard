@@ -11,9 +11,9 @@ Replaces the 5-minute cron with a persistent process that:
   - refreshes the heavier calls (speedtest archive, neighbor AP scan) every
     ~10 minutes (slow_loop), since those change slowly and are expensive
 
-Serves the dashboard + a small JSON API on http://127.0.0.1:8787 (loopback
-only -- this process holds live UniFi controller credentials, so it isn't
-exposed beyond this machine).
+Serves the dashboard + a small JSON API on http://127.0.0.1:8787 by default.
+BIND_HOST and BIND_PORT override the host/port; the container sets
+BIND_HOST=0.0.0.0 so the service is reachable from outside the container.
 
 Run via: uv run --with unifi-core --with aiounifi python3 live_server.py
 """

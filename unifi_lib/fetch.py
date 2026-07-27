@@ -68,7 +68,11 @@ class UnifiSession:
     def __init__(self):
         cfg = load_config()
         if not cfg["host"] or not cfg["username"] or not cfg["password"]:
-            raise RuntimeError(f"Missing UniFi credentials in {SETTINGS_FILE}")
+            raise RuntimeError(
+                "Missing UniFi credentials: set UNIFI_NETWORK_HOST, "
+                "UNIFI_NETWORK_USERNAME and UNIFI_NETWORK_PASSWORD in the "
+                f"environment, or provide them in {SETTINGS_FILE}"
+            )
         self.conn = ConnectionManager(
             host=cfg["host"], username=cfg["username"], password=cfg["password"],
             port=cfg["port"], site=cfg["site"], verify_ssl=cfg["verify_ssl"],
