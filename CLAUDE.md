@@ -7,51 +7,72 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A single-process live dashboard for a home UniFi network. It holds one long-lived
 authenticated controller session, pushes live numbers to the browser over a WebSocket,
 persists periodic snapshots to SQLite for history charts, and serves a single-page UI
-on `http://127.0.0.1:8787` (loopback only — the process holds live controller
-credentials, so it is deliberately not exposed beyond the machine).
+on `http://<nas-ip>:8787`. It runs as a Docker container on the NAS; the
+dashboard has no authentication and is published to the LAN unrestricted,
+which is a deliberate choice recorded in
+`docs/superpowers/specs/2026-07-26-docker-containerization-design.md`.
 
 There is no build step, no framework, and no test suite. The UI is one hand-written
 HTML file with inline CSS/JS.
 
 ## Running
 
-The server runs continuously under launchd as `com.hector.unifi-live-monitor`
-(plist at `~/Library/LaunchAgents/`). Backend changes require a restart:
+The server runs as a Docker container on the NAS, defined by
+`docker-compose.yml`. Images are built by GitHub Actions for linux/amd64 and
+linux/arm64 and published to ghcr.io; the NAS only pulls.
+
+Deploy a change: push to `main`, wait for the Actions run, then on the NAS:
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.hector.unifi-live-monitor
+cd /volume1/docker/unifi-dashboard && docker compose pull && docker compose up -d
 ```
 
-Frontend-only changes (`static/live_dashboard.html`) need just a browser reload.
+Run locally against the live controller (use a spare port to avoid clashing
+with anything else):
 
-Run in the foreground for debugging:
+```bash
+cp .env.example .env    # fill in credentials; .env is gitignored
+HOST_PORT=8788 docker compose up -d --build
+docker compose logs -f
+```
+
+Run in the foreground without Docker, as before:
 
 ```bash
 uv run --python 3.14 --with unifi-core --with aiounifi python3 live_server.py
 ```
 
-Syntax-check before restarting (there is no linter configured):
+Syntax-check before deploying (there is no linter configured):
 
 ```bash
 python3 -c "import ast; ast.parse(open('live_server.py').read())"
 ```
 
-Check for errors after a restart — the log also contains aiohttp access lines, so
-filter to the section after startup:
+Check for errors after a deploy:
 
 ```bash
-tail -300 live_server.log | sed -n '/Live server ready/,$p' | grep -i "loop failed\|tick failed\|Traceback"
+docker compose logs --no-color | grep -iE "loop failed|tick failed|Traceback"
 ```
+
+Configuration is entirely environment variables — see `.env.example`.
+`BIND_HOST`, `BIND_PORT` and `UNIFI_DB_PATH` all default to the original
+hardcoded values, so running the code directly still behaves as it always did.
 
 `poll_unifi.py` is a legacy one-shot poller kept for manual backfills; the live
 server owns all recurring polling now.
 
 ## Credentials
 
-`unifi_lib/fetch.py` reads controller host/username/password from the `env` block of
-`../../.claude/settings.local.json` (i.e. outside this directory). Nothing is stored
-in the repo, but note that `unifi_clients.db` contains real client MACs, hostnames
-and IPs — relevant if this is ever published.
+`unifi_lib/fetch.py` reads the controller host/username/password from the
+process environment first (`UNIFI_NETWORK_HOST`, `UNIFI_NETWORK_USERNAME`,
+`UNIFI_NETWORK_PASSWORD`), falling back to the `env` block of
+`../../.claude/settings.local.json` when that file exists — which it does only
+on the development Mac. In the container the values come from `.env`, which is
+gitignored and must never be committed.
+
+`unifi_clients.db` contains real client MACs, hostnames and IPs. It, the logs
+and `.env` are all excluded by `.gitignore` and `.dockerignore`; that exclusion
+is load-bearing, since this repository is on GitHub.
 
 ## Architecture
 
@@ -184,5 +205,6 @@ reads it and its `updated_at` drives stale-neighbor pruning. Keep that split if 
 change the cadence again.
 
 Note the existing ~654k rows were written at the old 60s rate and will age out of the
-30-day window on their own. `live_server.log` still grows unbounded via aiohttp
-access logging.
+30-day window on their own. Container logs are capped by the compose json-file driver
+at 3 × 10MB, so the aiohttp access logging that previously grew `live_server.log`
+without limit is now bounded.
