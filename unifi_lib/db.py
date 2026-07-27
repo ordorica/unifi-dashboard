@@ -220,6 +220,14 @@ def init_db(db: sqlite3.Connection) -> None:
         """
     )
 
+    # Migration: attribute a speedtest to the WAN Path it ran over. Nullable
+    # -- attribution is only possible when the controller's live status can
+    # be matched to an archived record (see wan_paths below); unattributed
+    # speedtests stay unattributed rather than being inferred.
+    existing_st_cols = {row[1] for row in db.execute("PRAGMA table_info(speedtests)").fetchall()}
+    if "wan_path_id" not in existing_st_cols:
+        db.execute("ALTER TABLE speedtests ADD COLUMN wan_path_id INTEGER")
+
     # rogue_aps: deduped per (bssid, ap_mac) -- ap_mac is the OUR AP that
     # observed this neighbor, so multiple rows per bssid = multiple of our
     # APs can see the same neighbor, each with its own signal reading.
@@ -275,6 +283,59 @@ def init_db(db: sqlite3.Connection) -> None:
     )
     db.execute("CREATE INDEX IF NOT EXISTS idx_vlan_history_network_ts ON vlan_client_history(network, ts)")
 
+    # wan_paths: identity table for WAN Paths (one internet connection, as
+    # the controller reports it via its own inventory key such as `WAN` or
+    # `WAN3`) -- distinct from the Gateway Device that owns it. This is
+    # deliberately NOT a time series and is never pruned: history is keyed
+    # on wan_paths.id via wan_stats, so pruning identities would orphan that
+    # history. See CONTEXT.md for the WAN Path / Gateway Device distinction.
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS wan_paths (
+            id INTEGER PRIMARY KEY,
+            gateway_mac TEXT NOT NULL,
+            wan_key TEXT NOT NULL,
+            ifname TEXT,
+            link_type TEXT,
+            isp_name TEXT,
+            asn INTEGER,
+            label_override TEXT,
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS wan_stats (
+            ts TEXT NOT NULL,
+            wan_path_id INTEGER NOT NULL,
+            status TEXT,
+            rx_rate_bps INTEGER,
+            tx_rate_bps INTEGER,
+            rx_bytes_total INTEGER,
+            tx_bytes_total INTEGER,
+            latency_ms REAL,
+            PRIMARY KEY (ts, wan_path_id)
+        )
+        """
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS idx_wan_stats_path_ts ON wan_stats(wan_path_id, ts)")
+
+    # speedtest_observations: raw speedtest-status readings as observed,
+    # persisted so attribution (see CONTEXT.md) survives a restart.
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS speedtest_observations (
+            observed_at TEXT NOT NULL,
+            ifname TEXT NOT NULL,
+            xput_download REAL,
+            xput_upload REAL,
+            PRIMARY KEY (ifname, xput_download, xput_upload)
+        )
+        """
+    )
+
     db.commit()
 
 
@@ -286,6 +347,12 @@ def prune_old(db: sqlite3.Connection, retention_days: int = RETENTION_DAYS) -> N
     db.execute("DELETE FROM port_stats WHERE ts < ?", (cutoff,))
     db.execute("DELETE FROM rtt_monitors WHERE ts < ?", (cutoff,))
     db.execute("DELETE FROM speedtests WHERE ts < ?", (cutoff,))
+    # wan_paths is deliberately NOT pruned here -- it is identity, not a time
+    # series, and wan_stats rows above are keyed on wan_paths.id. Pruning
+    # wan_paths would orphan wan_stats history and break the whole point of
+    # this design: continuity of a WAN Path's history across restarts.
+    db.execute("DELETE FROM wan_stats WHERE ts < ?", (cutoff,))
+    db.execute("DELETE FROM speedtest_observations WHERE observed_at < ?", (cutoff,))
     db.execute("DELETE FROM vlan_client_history WHERE ts < ?", (cutoff,))
     # rogue_aps isn't a time series (one row per bssid+ap_mac, upserted in
     # place), but drop entries nobody has seen in a while so stale/moved
