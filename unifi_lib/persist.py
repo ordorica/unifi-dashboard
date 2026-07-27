@@ -248,6 +248,43 @@ def persist_devices_and_gateways(db: sqlite3.Connection, devices: list[dict], ts
                 _persist_port_stats(db, raw, mac, ts)
 
 
+def persist_wan_stats(db: sqlite3.Connection, devices: list[dict], ts: str) -> int:
+    """One wan_stats row per WAN Path per cycle, across every gateway.
+
+    Byte totals are the controller's cumulative counters, kept monotonic so
+    _usage_since() can difference them; rates are instantaneous.
+    """
+    from .wan import discover_wan_paths
+    from .wan_identity import resolve_path_ids
+
+    written = 0
+    for raw in devices:
+        if device_category(raw) not in ("gateway", "cellular_gateway"):
+            continue
+        mac = raw.get("mac")
+        if not mac:
+            continue
+        # Resolve the whole gateway's paths at once: two paths sharing an ISP
+        # can only be distinguished by knowing which rows this cycle already
+        # claimed. See Task 3's interface note and ADR 0001.
+        paths = discover_wan_paths(raw)
+        for path, path_id in zip(paths, resolve_path_ids(db, mac, paths, ts)):
+            wan = raw.get(path.slot) or {}
+            rx_r, tx_r = _f(wan.get("rx_bytes-r")), _f(wan.get("tx_bytes-r"))
+            db.execute(
+                "INSERT OR REPLACE INTO wan_stats (ts, wan_path_id, status, rx_rate_bps, "
+                "tx_rate_bps, rx_bytes_total, tx_bytes_total, latency_ms) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (ts, path_id, path.status,
+                 int(rx_r * 8) if rx_r is not None else None,
+                 int(tx_r * 8) if tx_r is not None else None,
+                 wan.get("rx_bytes"), wan.get("tx_bytes"),
+                 _wan_latency(wan)),
+            )
+            written += 1
+    return written
+
+
 def _persist_primary_gateway(db, raw, mac, ts):
     sys_stats = raw.get("sys_stats") or {}
     system_stats = raw.get("system-stats") or {}

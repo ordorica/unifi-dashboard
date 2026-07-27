@@ -315,6 +315,7 @@ async def persist_loop():
             persist.persist_clients(conn, fast["online"], historical, ts)
             persist.persist_vlan_history(conn, ts)
             persist.persist_devices_and_gateways(conn, fast["devices"], ts)
+            wan_rows = persist.persist_wan_stats(conn, fast["devices"], ts)
             db.prune_old(conn)
             conn.commit()
 
@@ -333,7 +334,7 @@ async def persist_loop():
                     for r in offline_rows
                 ],
             })
-            log.info("persist_loop: snapshot written")
+            log.info("persist_loop: snapshot written (wan_rows=%d)", wan_rows)
         except Exception:
             log.exception("persist_loop failed")
 
