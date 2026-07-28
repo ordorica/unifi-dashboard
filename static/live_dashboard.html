@@ -268,10 +268,7 @@
          .seg is inline-flex, so its bottom margin adds to the following
          section's 28px instead of collapsing with it. -->
     <div class="controls">
-      <div class="seg" id="gatewaySeg">
-        <button class="seg-btn2 active" data-gw="primary">Primary (UDM Pro)</button>
-        <button class="seg-btn2" data-gw="cellular">Cellular failover (T-Mobile 5G)</button>
-      </div>
+      <div class="seg" id="gatewaySeg"></div>
     </div>
 
     <section class="section" id="sec-gwstats" data-sec="gwstats">
@@ -1159,18 +1156,45 @@ function onTick(tick) {
 }
 
 // ============================================================
-// OVERVIEW — gateway tiles + drill-down
+// OVERVIEW — WAN toggle + gateway tiles + drill-down
+//
+// Deliberate split (see CONTEXT.md): a WAN Path (what the toggle below
+// selects) and a Gateway Device are different things. CPU, memory, load,
+// temperature and carrier are properties of a *device*, not a path -- on
+// this network the cellular WAN Path is a GRE tunnel with no CPU at all,
+// while the Cellular Modem that does have a CPU owns no WAN Path. So
+// device tiles (renderGatewayStats) render every known Gateway Device
+// unconditionally and never read the WAN selection; only WAN-scoped data
+// (throughput/latency history, speedtests) follows the toggle.
 // ============================================================
-let selectedGateway = "primary";
-let lastGwHistory = [];
-let openTile = null;
+let WANS = [];
+let selectedWan = null;
+let lastGwHistory = [];       // WAN Path history (rx/tx/latency) -- follows selectedWan
+let lastDeviceHistory = [];   // Gateway Device history (cpu/mem/load/temp) -- follows the open tile's mac
+let openTile = null;          // { mac, metric } | null
+async function loadWans() {
+  WANS = await fetch("/api/wans").then(r => r.json()).catch(() => []);
+  const seg = document.getElementById("gatewaySeg");
+  // A network with one WAN needs no chooser; zero WANs must still render.
+  seg.innerHTML = WANS.length > 1
+    ? WANS.map((w, i) => `<button class="seg-btn2${i ? "" : " active"}" data-wan="${w.id}">${w.label}</button>`).join("")
+    : "";
+  selectedWan = WANS.length ? WANS[0].id : null;
+}
+function wanLabel(id) {
+  const w = WANS.find(x => x.id === id);
+  return w ? w.label : "WAN";
+}
+function selectedWanIsCellular() {
+  const w = WANS.find(x => x.id === selectedWan);
+  return !!(w && w.isCellular);
+}
 document.getElementById("gatewaySeg").addEventListener("click", e => {
   const btn = e.target.closest(".seg-btn2");
   if (!btn) return;
-  selectedGateway = btn.dataset.gw;
+  selectedWan = Number(btn.dataset.wan);
   document.querySelectorAll("#gatewaySeg .seg-btn2").forEach(b => b.classList.toggle("active", b === btn));
   openTile = null;
-  if (latestTick) { renderGatewayStats(latestTick); renderRttSection(latestTick); }
   loadWanChart(); loadSpeedtest(); loadWanUsage(); loadRttMonitors();
 });
 
@@ -1179,52 +1203,50 @@ const TILE_METRICS = {
   mem: { label: "Memory", unit: "%", series: [{ key: "mem", name: "Memory", color: "--slot-2", get: r => r.mem }] },
   load1: { label: "Load average (1m)", unit: "", series: [{ key: "load1", name: "Load avg (1m)", color: "--slot-3", get: r => r.load1 }] },
   tempCpu: { label: "CPU temperature", unit: "°C", series: [{ key: "tempCpu", name: "CPU temp", color: "--slot-8", get: r => r.tempCpu }] },
-  throughput: {
-    label: "Throughput", unit: "Mbps",
-    series: [
-      { key: "down", name: "Download", color: "--slot-1", get: r => r.rxRateBps != null ? r.rxRateBps/1e6 : null },
-      { key: "up", name: "Upload", color: "--slot-2", get: r => r.txRateBps != null ? r.txRateBps/1e6 : null },
-    ],
-  },
 };
 
+// Renders every known Gateway Device's own tiles (CPU/memory/temp-or-carrier)
+// plus the two site-wide counters. Deliberately takes no WAN selection --
+// see the header comment above.
 function renderGatewayStats(tick) {
-  const gw = tick.gateways && tick.gateways[selectedGateway];
   const statsEl = document.getElementById("ov-gateway-stats");
-  if (!gw) {
+  const gwEntries = Object.entries(tick.gateways || {});
+  if (gwEntries.length === 0) {
     statsEl.innerHTML = `<div class="tile"><div class="label">Gateway</div><div class="value muted-cell" style="font-size:15px;">Not detected in this poll</div></div>`;
     return;
   }
   const onlineDevices = (tick.devices || []).filter(d => d.status === "online").length;
   const clientsOnline = tick.clientsOnline ?? 0;
-  const throughputTile = `
-    <div class="tile" data-metric="throughput">
-      <div class="label">Throughput now<span class="drill-hint">history ▾</span></div>
-      <div class="value" style="font-size:18px; line-height:1.5;">↓ ${fmtBits(gw.rxRateBps)}<br>↑ ${fmtBits(gw.txRateBps)}</div>
-    </div>`;
-  if (selectedGateway === "primary") {
-    statsEl.innerHTML = `
-      <div class="tile" data-metric="cpu"><div class="label">Gateway CPU<span class="drill-hint">history ▾</span></div><div class="value ${cpuColor(gw.cpu)}">${gw.cpu ?? "—"}<span class="unit">%</span></div><div class="sub">${gw.name || ""} · load ${gw.load1 ?? "—"} / ${gw.load5 ?? "—"} / ${gw.load15 ?? "—"}</div></div>
-      <div class="tile" data-metric="mem"><div class="label">Gateway memory<span class="drill-hint">history ▾</span></div><div class="value ${memColor(gw.mem)}">${gw.mem ?? "—"}<span class="unit">%</span></div><div class="sub">uptime ${fmtUptime(gw.uptimeSec)}</div></div>
-      <div class="tile" data-metric="tempCpu"><div class="label">Gateway temperature<span class="drill-hint">history ▾</span></div><div class="value ${tempColor(gw.tempCpu)}">${gw.tempCpu ?? "—"}<span class="unit">°C</span></div><div class="sub">Local ${gw.tempLocal ?? "—"}° · PHY ${gw.tempPhy ?? "—"}°</div></div>
-      <div class="tile"><div class="label">Devices online</div><div class="value good">${onlineDevices}<span class="unit">/ ${(tick.devices||[]).length}</span></div><div class="sub">switches, APs &amp; gateway</div></div>
-      <div class="tile"><div class="label">Clients connected</div><div class="value">${clientsOnline}</div><div class="sub">currently online</div></div>
-      ${throughputTile}
-    `;
-  } else {
-    statsEl.innerHTML = `
-      <div class="tile" data-metric="cpu"><div class="label">Cellular CPU<span class="drill-hint">history ▾</span></div><div class="value ${cpuColor(gw.cpu)}">${gw.cpu ?? "—"}<span class="unit">%</span></div><div class="sub">${gw.name || ""} · ${gw.carrier || "no carrier"}</div></div>
-      <div class="tile" data-metric="mem"><div class="label">Cellular memory<span class="drill-hint">history ▾</span></div><div class="value ${memColor(gw.mem)}">${gw.mem ?? "—"}<span class="unit">%</span></div><div class="sub">uptime ${fmtUptime(gw.uptimeSec)}</div></div>
-      <div class="tile"><div class="label">Mode</div><div class="value" style="font-size:16px;">Failover backup</div><div class="sub">${gw.hasCarrier ? "carrier attached" : "no carrier"}</div></div>
-      <div class="tile"><div class="label">Status</div><div class="value ${gw.status==='online'?'good':'critical'}" style="font-size:16px;">${gw.status}</div><div class="sub">load ${gw.load1 ?? "—"} / ${gw.load5 ?? "—"} / ${gw.load15 ?? "—"}</div></div>
-      <div class="tile"><div class="label">Clients connected</div><div class="value">${clientsOnline}</div><div class="sub">site-wide, currently online</div></div>
-      ${throughputTile}
-    `;
-  }
+
+  const deviceTiles = gwEntries.map(([, gw]) => {
+    const name = gw.name || "Gateway device";
+    const thirdTile = gw.kind === "primary"
+      ? `<div class="tile" data-metric="tempCpu" data-gw-mac="${gw.mac}"><div class="label">${name} temperature<span class="drill-hint">history ▾</span></div><div class="value ${tempColor(gw.tempCpu)}">${gw.tempCpu ?? "—"}<span class="unit">°C</span></div><div class="sub">Local ${gw.tempLocal ?? "—"}° · PHY ${gw.tempPhy ?? "—"}°</div></div>`
+      : `<div class="tile"><div class="label">${name} status</div><div class="value ${gw.status==='online'?'good':'critical'}" style="font-size:16px;">${gw.status}</div><div class="sub">${gw.carrier || (gw.hasCarrier ? "carrier attached" : "no carrier")}</div></div>`;
+    return `
+      <div class="tile" data-metric="cpu" data-gw-mac="${gw.mac}"><div class="label">${name} CPU<span class="drill-hint">history ▾</span></div><div class="value ${cpuColor(gw.cpu)}">${gw.cpu ?? "—"}<span class="unit">%</span></div><div class="sub">load ${gw.load1 ?? "—"} / ${gw.load5 ?? "—"} / ${gw.load15 ?? "—"}</div></div>
+      <div class="tile" data-metric="mem" data-gw-mac="${gw.mac}"><div class="label">${name} memory<span class="drill-hint">history ▾</span></div><div class="value ${memColor(gw.mem)}">${gw.mem ?? "—"}<span class="unit">%</span></div><div class="sub">uptime ${fmtUptime(gw.uptimeSec)}</div></div>
+      ${thirdTile}
+      <div class="tile"><div class="label">${name} throughput</div><div class="value" style="font-size:16px; line-height:1.5;">↓ ${fmtBits(gw.rxRateBps)}<br>↑ ${fmtBits(gw.txRateBps)}</div></div>`;
+  }).join("");
+
+  statsEl.innerHTML = `
+    ${deviceTiles}
+    <div class="tile"><div class="label">Devices online</div><div class="value good">${onlineDevices}<span class="unit">/ ${(tick.devices||[]).length}</span></div><div class="sub">switches, APs &amp; gateway</div></div>
+    <div class="tile"><div class="label">Clients connected</div><div class="value">${clientsOnline}</div><div class="sub">currently online</div></div>
+  `;
   statsEl.querySelectorAll(".tile[data-metric]").forEach(t => {
-    t.classList.toggle("tile-open", t.dataset.metric === openTile);
+    const mac = t.dataset.gwMac, metric = t.dataset.metric;
+    t.classList.toggle("tile-open", !!openTile && openTile.mac === mac && openTile.metric === metric);
     t.addEventListener("click", () => {
-      openTile = openTile === t.dataset.metric ? null : t.dataset.metric;
+      const isOpen = openTile && openTile.mac === mac && openTile.metric === metric;
+      if (isOpen) {
+        openTile = null;
+      } else {
+        openTile = { mac, metric };
+        lastDeviceHistory = [];
+        loadDeviceHistory(mac);
+      }
       renderGatewayStats(tick);
       renderTileDrill();
     });
@@ -1240,7 +1262,10 @@ function renderGatewayStats(tick) {
 // a bogus 0 ms.
 // ============================================================
 function renderRttSection(tick) {
-  const r = (tick.rtt || {})[selectedGateway];
+  // tick.rtt is keyed "primary"/"cellular" by the backend (predates the
+  // wan_path_id refactor -- see handle_rtt_history), so the selected WAN is
+  // resolved to a key via its isCellular flag rather than by id.
+  const r = (tick.rtt || {})[selectedWanIsCellular() ? "cellular" : "primary"];
   const statsEl = document.getElementById("rtt-stats");
   if (!r) {
     statsEl.innerHTML = `<div class="tile"><div class="label">RTT</div><div class="value muted-cell" style="font-size:15px;">Not reported for this gateway</div></div>`;
@@ -1252,7 +1277,7 @@ function renderRttSection(tick) {
     <div class="tile">
       <div class="label">Current RTT</div>
       <div class="value" style="color:${latencyColor(r.latencyMs) || "var(--text-muted)"}">${r.latencyMs != null ? r.latencyMs : "—"}${r.latencyMs != null ? '<span class="unit">ms</span>' : ""}</div>
-      <div class="sub">${isStandby ? "standby — not measured" : (selectedGateway === "primary" ? "wired WAN" : "cellular WAN")}</div>
+      <div class="sub">${isStandby ? "standby — not measured" : (selectedWanIsCellular() ? "cellular WAN" : "wired WAN")}</div>
     </div>
     <div class="tile">
       <div class="label">24h average</div>
@@ -1295,11 +1320,11 @@ function sparklineSvg(values, colorVar) {
 
 async function loadRttMonitors() {
   const range = document.querySelector("#wanRangeSeg .seg-btn2.active").dataset.range;
-  const gw = selectedGateway;
-  const res = await fetch(`/api/history/rtt?gateway=${gw}&range=${range}`);
+  const wan = selectedWan;
+  const res = await fetch(`/api/history/rtt?wan=${wan}&range=${range}`);
   const targets = await res.json();
-  // A slow response can land after the user has switched gateway/range.
-  if (selectedGateway !== gw) return;
+  // A slow response can land after the user has switched WAN/range.
+  if (selectedWan !== wan) return;
   const el = document.getElementById("rtt-monitors");
   if (targets.length === 0) {
     el.innerHTML = `<p class="muted-cell" style="font-size:12px;">No per-target monitors recorded yet for this path.</p>`;
@@ -1332,7 +1357,7 @@ function renderRttChart() {
   const range = document.querySelector("#wanRangeSeg .seg-btn2.active").dataset.range;
   const rangeLabel = { "24h": "24 hours", "7d": "7 days", "14d": "14 days", "30d": "30 days" }[range];
   document.getElementById("rtt-chart-title").textContent =
-    `Round-trip time — ${selectedGateway === "primary" ? "Primary WAN" : "Cellular failover"}, last ${rangeLabel}`;
+    `Round-trip time — ${wanLabel(selectedWan)}, last ${rangeLabel}`;
   renderLineChart(document.getElementById("rtt-chart-wrap"), {
     series: [{ key: "rtt", name: "RTT", color: "--slot-7", data: lastGwHistory.map(r => r.latencyMs) }],
     xLabels: lastGwHistory.map(r => bucketLabel(r.t, range)),
@@ -1343,19 +1368,32 @@ function renderRttChart() {
   });
 }
 
+// Fetches history for one Gateway Device's own metrics (cpu/mem/load/temp),
+// independent of the WAN toggle -- see the header comment above
+// renderGatewayStats.
+async function loadDeviceHistory(mac) {
+  const range = document.querySelector("#wanRangeSeg .seg-btn2.active").dataset.range;
+  const res = await fetch(`/api/history/gateway?mac=${encodeURIComponent(mac)}&range=${range}`);
+  const rows = await res.json();
+  // A slow response can land after the user has closed/switched the tile.
+  if (!openTile || openTile.mac !== mac) return;
+  lastDeviceHistory = rows;
+  renderTileDrill();
+}
+
 function renderTileDrill() {
   const area = document.getElementById("tile-drill-area");
-  if (!openTile || lastGwHistory.length === 0) { area.innerHTML = ""; return; }
-  const metric = TILE_METRICS[openTile];
+  if (!openTile || lastDeviceHistory.length === 0) { area.innerHTML = ""; return; }
+  const metric = TILE_METRICS[openTile.metric];
   const legend = metric.series.length > 1
     ? `<div class="legend" style="margin-bottom:8px;">${metric.series.map(s => `<span class="legend-item"><span class="legend-swatch" style="background:var(${s.color})"></span>${s.name}</span>`).join("")}</div>`
     : "";
   area.innerHTML = `<div class="tile-drill"><div class="drill-title">${metric.label} — recent history</div>${legend}<div class="chart-wrap" id="tile-drill-chart"></div></div>`;
   const range = document.querySelector("#wanRangeSeg .seg-btn2.active").dataset.range;
   renderLineChart(document.getElementById("tile-drill-chart"), {
-    series: metric.series.map(s => ({ key: s.key, name: s.name, color: s.color, data: lastGwHistory.map(s.get) })),
-    xLabels: lastGwHistory.map(r => bucketLabel(r.t, range)),
-    xValues: lastGwHistory.map(r => bucketTime(r.t)),
+    series: metric.series.map(s => ({ key: s.key, name: s.name, color: s.color, data: lastDeviceHistory.map(s.get) })),
+    xLabels: lastDeviceHistory.map(r => bucketLabel(r.t, range)),
+    xValues: lastDeviceHistory.map(r => bucketTime(r.t)),
     yFormat: v => v.toFixed(1) + (metric.unit ? " " + metric.unit : ""),
     height: 160,
   });
@@ -1640,8 +1678,8 @@ async function loadWanChart() {
   const range = document.querySelector("#wanRangeSeg .seg-btn2.active").dataset.range;
   const rangeLabel = { "24h": "24 hours", "7d": "7 days", "14d": "14 days", "30d": "30 days" }[range];
   document.getElementById("wan-chart-title").textContent =
-    `Download / upload throughput — ${selectedGateway === "primary" ? "Primary WAN" : "Cellular failover"}, last ${rangeLabel}`;
-  const res = await fetch(`/api/history/wan?gateway=${selectedGateway}&range=${range}`);
+    `Download / upload throughput — ${wanLabel(selectedWan)}, last ${rangeLabel}`;
+  const res = await fetch(`/api/history/wan?wan=${selectedWan}&range=${range}`);
   const rows = await res.json();
   lastGwHistory = rows;
   renderLineChart(document.getElementById("wan-chart-wrap"), {
@@ -1654,12 +1692,11 @@ async function loadWanChart() {
     yFormat: v => v.toFixed(1) + " Mbps",
     yFormatShort: v => v >= 100 ? Math.round(v) : v.toFixed(0),
   });
-  if (openTile) renderTileDrill();
   renderRttChart();
 }
 
 async function loadWanUsage() {
-  const res = await fetch(`/api/usage/wan?gateway=${selectedGateway}`);
+  const res = await fetch(`/api/usage/wan?wan=${selectedWan}`);
   const data = await res.json();
   const labels = { "24h": "Last 24 hours", "7d": "Last 7 days", "30d": "Last 30 days" };
   document.getElementById("wan-usage-stats").innerHTML = Object.keys(labels).map(key => {
@@ -1677,10 +1714,11 @@ document.getElementById("wanRangeSeg").addEventListener("click", e => {
   document.querySelectorAll("#wanRangeSeg .seg-btn2").forEach(b => b.classList.toggle("active", b === btn));
   loadWanChart();
   loadRttMonitors();
+  if (openTile) loadDeviceHistory(openTile.mac);
 });
 
 async function loadSpeedtest() {
-  const res = await fetch(`/api/history/speedtest?gateway=${selectedGateway}`);
+  const res = await fetch(`/api/history/speedtest?wan=${selectedWan}`);
   const rows = await res.json();
   renderLineChart(document.getElementById("speed-chart-wrap"), {
     series: [
@@ -1699,7 +1737,7 @@ async function loadSpeedtest() {
   });
   const recent = rows.slice(-8).reverse();
   document.getElementById("speed-tbody").innerHTML = recent.length === 0
-    ? `<tr class="empty-row"><td colspan="4">No speedtests recorded yet for this gateway.</td></tr>`
+    ? `<tr class="empty-row"><td colspan="4">No speedtests recorded yet for this WAN path.</td></tr>`
     : recent.map(r => `
       <tr>
         <td class="muted-cell">${new Date(r.ts).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</td>
@@ -3278,10 +3316,14 @@ setupDeviceTableSort();
 // A failure here is non-fatal: names still render, just without VLAN colours.
 loadNetworks().catch(e => console.warn("network list unavailable", e)).finally(() => {
   connectWs();
-  loadWanChart();
-  loadSpeedtest();
-  loadWanUsage();
-  loadRttMonitors();
+  // loadWans() must resolve before the WAN-scoped loaders below fire, or the
+  // first request goes out with no WAN selected and comes back empty.
+  loadWans().finally(() => {
+    loadWanChart();
+    loadSpeedtest();
+    loadWanUsage();
+    loadRttMonitors();
+  });
   loadFlowStats();
   loadFlowsRecent();
   loadHealth();
