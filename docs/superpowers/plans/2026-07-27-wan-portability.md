@@ -1184,3 +1184,74 @@ network cannot produce. Tasks 4-8 are verified against the live controller.
 
 Attribution of *historical* speedtests is impossible and expected to stay NULL;
 only tests observed while the dashboard is running can be attributed.
+
+---
+
+### Task 9: Key RTT history on WAN Path
+
+**Added after Task 6 revealed the gap.** `rtt_monitors` still keys on the legacy
+`gateway_kind` primary/cellular column, so `handle_rtt_history` bridges `?wan=`
+through `link_type`. That works on a network with one wired and one cellular WAN,
+but **cannot distinguish two non-cellular WAN Paths on one gateway** — the exact
+two-slot limitation this plan exists to remove, surviving in one endpoint.
+
+**Files:**
+- Modify: `unifi_lib/db.py` — additive column + prune unchanged
+- Modify: `unifi_lib/persist.py` — write `wan_path_id` when recording monitors
+- Modify: `live_server.py` — `handle_rtt_history` keys on `wan_path_id`, bridge deleted
+
+**Interfaces:** consumes `resolve_path_ids` (Task 3) and `wan_paths` (Task 2).
+
+- [ ] **Step 1: Add the column**
+
+In `init_db()`, with the other `PRAGMA table_info` migrations:
+
+```python
+    existing_rtt_cols = {row[1] for row in db.execute("PRAGMA table_info(rtt_monitors)").fetchall()}
+    if "wan_path_id" not in existing_rtt_cols:
+        db.execute("ALTER TABLE rtt_monitors ADD COLUMN wan_path_id INTEGER")
+```
+
+Do not change the primary key and do not drop `gateway_kind` — additive rule.
+Rows predating this keep `wan_path_id IS NULL`.
+
+- [ ] **Step 2: Populate it**
+
+Wherever `rtt_monitors` rows are written, resolve the owning WAN Path the same
+way `persist_wan_stats` does — one `resolve_path_ids` call per gateway, matched
+to the monitor's WAN by the path's `key`. A monitor whose WAN cannot be resolved
+writes `NULL`; it must never fall back to a `gateway_kind` guess.
+
+- [ ] **Step 3: Key the handler on it**
+
+Replace `handle_rtt_history`'s `link_type`→`gateway_kind` bridge with a direct
+`WHERE wan_path_id = ?`. Delete the bridge and its CARRY FORWARD note. A missing
+or unresolvable `?wan=` returns `[]`, never a cross-WAN aggregate.
+
+- [ ] **Step 4: Verify**
+
+```bash
+grep -n "gateway_kind" live_server.py || echo "PASS: no gateway_kind in handlers"
+```
+
+Then, using a temp database via `UNIFI_DB_PATH` (never the production file),
+assert that two `wan_paths` rows on one gateway with the **same** `link_type`
+(`ethernet`) resolve to different `wan_path_id`s in `rtt_monitors`, and that
+querying one returns only its own rows. That case is the whole point of the task
+and is the one the bridge could not express.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add unifi_lib/db.py unifi_lib/persist.py live_server.py
+git commit -m "feat: key RTT history on WAN Path identity
+
+rtt_monitors keyed on the legacy gateway_kind primary/cellular column, so
+handle_rtt_history had to bridge ?wan= through link_type -- which cannot
+distinguish two non-cellular WAN Paths on one gateway. That was the last
+two-slot assumption in the codebase.
+
+Adds an additive wan_path_id column, populates it from the same identity
+resolution wan_stats uses, and keys the handler on it directly.
+Unresolvable monitors write NULL rather than guessing."
+```
