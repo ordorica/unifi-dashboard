@@ -422,29 +422,64 @@ def _bucket_query(range_key: str) -> tuple[str, str]:
     return (now - timedelta(days=7)).isoformat(), "%Y-%m-%dT%H:%M:00"  # default 7d
 
 
+async def handle_wans(request):
+    """Discovered WAN Paths with their stable ids. May legitimately be empty."""
+    conn = db.connect()
+    rows = conn.execute(
+        "SELECT id, wan_key, ifname, link_type, isp_name, asn, label_override "
+        "FROM wan_paths ORDER BY id"
+    ).fetchall()
+    conn.close()
+    return web.json_response([
+        {"id": r[0], "key": r[1], "ifname": r[2], "linkType": r[3],
+         "isCellular": bool(r[3] and r[3].startswith("wireless")),
+         "asn": r[5], "label": r[6] or r[4] or r[2] or r[1]}
+        for r in rows
+    ])
+
+
 async def handle_wan_history(request):
-    """Gateway health history: throughput, CPU/mem, load average, temps.
-    Serves both the WAN traffic chart and per-tile drill-down charts."""
-    gateway = request.query.get("gateway", "primary")
+    """Per-WAN throughput and latency history for one WAN Path."""
+    wan_id = request.query.get("wan")
     range_key = request.query.get("range", "7d")
     cutoff, bucket_fmt = _bucket_query(range_key)
     conn = db.connect()
     rows = conn.execute(
         f"""
         SELECT strftime('{bucket_fmt}', ts) AS bucket,
-               AVG(wan_rx_rate_bps), AVG(wan_tx_rate_bps), AVG(cpu_pct), AVG(mem_pct),
-               AVG(load1), AVG(load5), AVG(load15), AVG(temp_cpu), AVG(wan_latency_ms)
-        FROM gateway_stats
-        WHERE gateway_kind = ? AND ts >= ?
+               AVG(rx_rate_bps), AVG(tx_rate_bps), AVG(latency_ms)
+        FROM wan_stats
+        WHERE wan_path_id = ? AND ts >= ?
         GROUP BY bucket ORDER BY bucket
         """,
-        (gateway, cutoff),
+        (wan_id, cutoff),
     ).fetchall()
     conn.close()
     return web.json_response([
-        {"t": r[0], "rxRateBps": r[1], "txRateBps": r[2], "cpu": r[3], "mem": r[4],
-         "load1": r[5], "load5": r[6], "load15": r[7], "tempCpu": r[8], "latencyMs": r[9]}
-        for r in rows
+        {"t": r[0], "rxRateBps": r[1], "txRateBps": r[2], "latencyMs": r[3]} for r in rows
+    ])
+
+
+async def handle_gateway_history(request):
+    """Device-scoped history for one Gateway Device: CPU, memory, load, temps."""
+    mac = request.query.get("mac")
+    range_key = request.query.get("range", "7d")
+    cutoff, bucket_fmt = _bucket_query(range_key)
+    conn = db.connect()
+    rows = conn.execute(
+        f"""
+        SELECT strftime('{bucket_fmt}', ts) AS bucket,
+               AVG(cpu_pct), AVG(mem_pct), AVG(load1), AVG(load5), AVG(load15), AVG(temp_cpu)
+        FROM gateway_stats
+        WHERE gateway_mac = ? AND ts >= ?
+        GROUP BY bucket ORDER BY bucket
+        """,
+        (mac, cutoff),
+    ).fetchall()
+    conn.close()
+    return web.json_response([
+        {"t": r[0], "cpu": r[1], "mem": r[2], "load1": r[3], "load5": r[4],
+         "load15": r[5], "tempCpu": r[6]} for r in rows
     ])
 
 
@@ -974,11 +1009,25 @@ async def handle_wifi_health(request):
 async def handle_rtt_history(request):
     """Per-target latency series for one WAN path, one entry per
     (target, monitor_type) -- the same host can be probed over both ICMP
-    and DNS, and those are separate measurements."""
-    gateway = request.query.get("gateway", "primary")
+    and DNS, and those are separate measurements.
+
+    rtt_monitors predates the wan_path_id refactor (Tasks 2-5) and has no
+    wan_path_id column of its own -- it is still keyed on the legacy
+    primary/cellular gateway_kind that persist._persist_rtt_monitors writes
+    via WAN_PATH_KINDS. Adding a real column is a db.py schema change out of
+    scope for this task, so a WAN Path is resolved to that column here via
+    is_cellular (never by wan_key name, per CONTEXT.md). This means two
+    non-cellular WAN Paths on the same gateway cannot be told apart in this
+    table until it gets a proper migration."""
+    wan_id = request.query.get("wan")
     range_key = request.query.get("range", "24h")
     cutoff, bucket_fmt = _bucket_query(range_key)
     conn = db.connect()
+    path = conn.execute("SELECT link_type FROM wan_paths WHERE id = ?", (wan_id,)).fetchone()
+    if not path:
+        conn.close()
+        return web.json_response([])
+    gateway_kind = "cellular" if (path[0] or "").startswith("wireless") else "primary"
     rows = conn.execute(
         f"""
         SELECT target, monitor_type, strftime('{bucket_fmt}', ts) AS bucket,
@@ -987,7 +1036,7 @@ async def handle_rtt_history(request):
         GROUP BY target, monitor_type, bucket
         ORDER BY target, monitor_type, bucket
         """,
-        (gateway, cutoff),
+        (gateway_kind, cutoff),
     ).fetchall()
     conn.close()
 
@@ -1068,16 +1117,17 @@ async def handle_port_usage(request):
 
 
 async def handle_wan_usage(request):
-    """24h/7d/30d WAN bandwidth used, via gateway_stats' existing cumulative
-    wan_rx_bytes_total/wan_tx_bytes_total counters -- no new storage needed."""
-    gateway = request.query.get("gateway", "primary")
+    """24h/7d/30d WAN bandwidth used for one WAN Path, via wan_stats'
+    existing cumulative rx_bytes_total/tx_bytes_total counters -- no new
+    storage needed."""
+    wan_id = request.query.get("wan")
     conn = db.connect()
     out = {}
     for range_key in ("24h", "7d", "30d"):
         cutoff, _ = _bucket_query(range_key)
         rx, tx = _usage_since(
-            conn, "gateway_stats", ["gateway_kind"], (gateway,), cutoff,
-            rx_col="wan_rx_bytes_total", tx_col="wan_tx_bytes_total",
+            conn, "wan_stats", ["wan_path_id"], (wan_id,), cutoff,
+            rx_col="rx_bytes_total", tx_col="tx_bytes_total",
         )
         out[range_key] = {"rxBytes": rx, "txBytes": tx}
     conn.close()
@@ -1102,11 +1152,14 @@ async def handle_neighbor_history(request):
 
 
 async def handle_speedtest_history(request):
-    gateway = request.query.get("gateway", "primary")
+    """Archived speedtests attributed to one WAN Path (Task 5 attribution).
+    Unattributed speedtests (wan_path_id IS NULL) never match here -- an
+    unattributable speedtest stays unattributed rather than being guessed."""
+    wan_id = request.query.get("wan")
     conn = db.connect()
     rows = conn.execute(
-        "SELECT ts, download_mbps, upload_mbps, latency_ms FROM speedtests WHERE source = ? ORDER BY ts",
-        (gateway,),
+        "SELECT ts, download_mbps, upload_mbps, latency_ms FROM speedtests WHERE wan_path_id = ? ORDER BY ts",
+        (wan_id,),
     ).fetchall()
     conn.close()
     return web.json_response([{"ts": r[0], "down": r[1], "up": r[2], "lat": r[3]} for r in rows])
@@ -1344,7 +1397,9 @@ def build_app() -> web.Application:
     app.router.add_get("/api/devices", handle_devices)
     app.router.add_get("/api/vlans", handle_vlans)
     app.router.add_get("/api/networks", handle_networks)
+    app.router.add_get("/api/wans", handle_wans)
     app.router.add_get("/api/history/wan", handle_wan_history)
+    app.router.add_get("/api/history/gateway", handle_gateway_history)
     app.router.add_get("/api/history/speedtest", handle_speedtest_history)
     app.router.add_get("/api/history/vlan/{network}", handle_vlan_history)
     app.router.add_get("/api/history/ap/{mac}/{band}", handle_ap_history)
