@@ -1220,7 +1220,7 @@ function renderGatewayStats(tick) {
 
   const deviceTiles = gwEntries.map(([, gw]) => {
     const name = gw.name || "Gateway device";
-    const thirdTile = gw.kind === "primary"
+    const thirdTile = gw.category === "gateway"
       ? `<div class="tile" data-metric="tempCpu" data-gw-mac="${gw.mac}"><div class="label">${name} temperature<span class="drill-hint">history ▾</span></div><div class="value ${tempColor(gw.tempCpu)}">${gw.tempCpu ?? "—"}<span class="unit">°C</span></div><div class="sub">Local ${gw.tempLocal ?? "—"}° · PHY ${gw.tempPhy ?? "—"}°</div></div>`
       : `<div class="tile"><div class="label">${name} status</div><div class="value ${gw.status==='online'?'good':'critical'}" style="font-size:16px;">${gw.status}</div><div class="sub">${gw.carrier || (gw.hasCarrier ? "carrier attached" : "no carrier")}</div></div>`;
     return `
@@ -1256,16 +1256,17 @@ function renderGatewayStats(tick) {
 
 // ============================================================
 // OVERVIEW — RTT / ping latency
-// The UDM reports latency for BOTH paths (wan1 = primary, wan3 = cellular);
-// the U5G device itself reports none. A standby failover link reports 0,
-// which the backend normalises to null so it shows as "standby" rather than
-// a bogus 0 ms.
+// The Gateway Device that owns WAN interfaces reports latency for every WAN
+// Path it has; a Cellular Modem that owns no WAN Path reports none. A
+// standby failover link reports 0, which the backend normalises to null so
+// it shows as "standby" rather than a bogus 0 ms.
 // ============================================================
 function renderRttSection(tick) {
-  // tick.rtt is keyed "primary"/"cellular" by the backend (predates the
-  // wan_path_id refactor -- see handle_rtt_history), so the selected WAN is
-  // resolved to a key via its isCellular flag rather than by id.
-  const r = (tick.rtt || {})[selectedWanIsCellular() ? "cellular" : "primary"];
+  // tick.rtt is keyed by WAN Path key (e.g. "WAN", "WAN3") -- the same
+  // identifier /api/wans exposes as `key` for the selected WAN, so look it
+  // up that way rather than via a primary/cellular label.
+  const selectedWanEntry = WANS.find(w => w.id === selectedWan);
+  const r = (tick.rtt || {})[selectedWanEntry ? selectedWanEntry.key : ""];
   const statsEl = document.getElementById("rtt-stats");
   if (!r) {
     statsEl.innerHTML = `<div class="tile"><div class="label">RTT</div><div class="value muted-cell" style="font-size:15px;">Not reported for this gateway</div></div>`;
@@ -1632,8 +1633,11 @@ async function loadDeviceDrill(mac, category) {
   const cacheKey = mac + ":" + range;
   deviceDrillInFlight.add(cacheKey);
   try {
-    const url = category === "gateway" ? `/api/history/wan?gateway=primary&range=${range}`
-              : category === "cellular_gateway" ? `/api/history/wan?gateway=cellular&range=${range}`
+    // A Gateway Device's throughput is the aggregate of its WAN Paths (see
+    // CONTEXT.md) -- /api/history/wan?mac= sums across every WAN Path this
+    // gateway owns, for both categories of Gateway Device alike.
+    const url = (category === "gateway" || category === "cellular_gateway")
+              ? `/api/history/wan?mac=${encodeURIComponent(mac)}&range=${range}`
               : `/api/history/device/${encodeURIComponent(mac)}?range=${range}`;
     const res = await fetch(url);
     const rows = await res.json();
@@ -1751,8 +1755,8 @@ async function loadSpeedtest() {
 // ============================================================
 // WIFI — AP table (live) with band toggle + drill-down
 // ============================================================
-const BAND_LABEL = { ng: "2.4GHz", na: "5GHz", "6e": "6GHz" };
-const BAND_SLOT = { ng: "--slot-3", na: "--slot-1", "6e": "--slot-7" };
+const BAND_LABEL = { ng: "2.4GHz", na: "5GHz", "6e": "6GHz", ax: "6GHz" };
+const BAND_SLOT = { ng: "--slot-3", na: "--slot-1", "6e": "--slot-7", ax: "--slot-7" };
 let apBandFilter = "";
 let apApFilter = ""; // AP mac; keyed on mac not name so duplicate names can't collide
 let lastAps = [];

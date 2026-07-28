@@ -42,8 +42,16 @@ def set_networks(networks: list[dict]) -> int:
     return len(entries)
 
 DEVICE_CATEGORY_BY_TYPE = {
+    # Gateways
     "udm": "gateway", "usg": "gateway", "ugw": "gateway",
-    "usw": "switch", "uap": "ap", "umbb": "cellular_gateway",
+    "uxg": "gateway", "ucg": "gateway",
+    # Switches
+    "usw": "switch", "usl": "switch",
+    # Access points
+    "uap": "ap",
+    # Cellular modems -- a device category, independent of whether any WAN
+    # Path is cellular.
+    "umbb": "cellular_gateway", "umr": "cellular_gateway",
 }
 
 
@@ -175,11 +183,6 @@ def _wan_latency(wan: dict) -> float | None:
     return _f(wan.get("latency")) or None
 
 
-# WAN path -> gateway_kind. The UDM reports both paths; wan3/WAN3 is the
-# cellular failover (confirmed via active_geo_info.WAN3 -> T-Mobile ASN).
-WAN_PATH_KINDS = {"WAN": "primary", "WAN3": "cellular"}
-
-
 def wan_monitors(stats: dict) -> list[dict]:
     """All latency monitors for one WAN path, merging the controller's two
     separate lists. `monitors` and `alerting_monitors` are different sets --
@@ -198,11 +201,6 @@ def wan_monitors(stats: dict) -> list[dict]:
 
 
 def persist_devices_and_gateways(db: sqlite3.Connection, devices: list[dict], ts: str) -> None:
-    # The cellular path's latency is reported by the UDM as wan3, not by the
-    # U5G device itself, so grab it up front and hand it to the cellular row.
-    gw_raw = next((d for d in devices if device_category(d) == "gateway"), None)
-    cellular_latency = _wan_latency((gw_raw or {}).get("wan3") or {})
-
     for raw in devices:
         mac = raw.get("mac")
         if not mac:
@@ -225,14 +223,14 @@ def persist_devices_and_gateways(db: sqlite3.Connection, devices: list[dict], ts
         if category == "gateway":
             _persist_primary_gateway(db, raw, mac, ts)
             _persist_port_stats(db, raw, mac, ts)
-            # The UDM is the authority for BOTH WAN paths' monitors.
+            # The UDM is the authority for all of its WAN paths' monitors.
             _persist_rtt_monitors(db, raw, ts)
         elif category == "cellular_gateway":
-            _persist_cellular_gateway(db, raw, mac, ts, cellular_latency)
+            _persist_cellular_gateway(db, raw, mac, ts)
         else:
-            # Gateways already get bandwidth history via gateway_stats
-            # (wan_rx_rate_bps/wan_tx_rate_bps) -- everything else (switch,
-            # ap, other) uses its uplink port's byte-rate counters instead.
+            # Gateways get their WAN throughput history via wan_stats
+            # (persist_wan_stats) -- everything else (switch, ap, other)
+            # uses its uplink port's byte-rate counters instead.
             _persist_device_bandwidth(db, raw, mac, ts)
             if category == "ap":
                 _persist_ap_radios(db, raw, mac, ts)
@@ -280,70 +278,63 @@ def persist_wan_stats(db: sqlite3.Connection, devices: list[dict], ts: str) -> i
 
 
 def _persist_primary_gateway(db, raw, mac, ts):
+    # WAN throughput/latency are no longer written here -- wan_stats
+    # (persist_wan_stats) owns that, keyed on wan_path_id rather than this
+    # device's MAC. The wan_* columns stay in the schema (additive-migration
+    # rule) but only device metrics are written into this row now.
     sys_stats = raw.get("sys_stats") or {}
     system_stats = raw.get("system-stats") or {}
     temps = {t.get("name"): t.get("value") for t in (raw.get("temperatures") or [])}
-    wan = raw.get("wan1") or raw.get("wan") or {}
     db.execute(
         """
         INSERT OR REPLACE INTO gateway_stats
             (ts, gateway_mac, gateway_kind, gateway_name, cpu_pct, mem_pct, load1, load5, load15,
-             uptime_sec, temp_cpu, temp_local, temp_phy, wan_rx_rate_bps, wan_tx_rate_bps,
-             wan_rx_bytes_total, wan_tx_bytes_total, carrier, wan_latency_ms)
-        VALUES (?, ?, 'primary', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+             uptime_sec, temp_cpu, temp_local, temp_phy)
+        VALUES (?, ?, 'primary', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (ts, mac, raw.get("name"),
          _f(system_stats.get("cpu")), _f(system_stats.get("mem")),
          _f(sys_stats.get("loadavg_1")), _f(sys_stats.get("loadavg_5")), _f(sys_stats.get("loadavg_15")),
-         raw.get("uptime"), temps.get("CPU"), temps.get("Local"), temps.get("PHY"),
-         wan.get("rx_rate"), wan.get("tx_rate"), wan.get("rx_bytes"), wan.get("tx_bytes"),
-         _wan_latency(wan)),
+         raw.get("uptime"), temps.get("CPU"), temps.get("Local"), temps.get("PHY")),
     )
 
 
-def _persist_cellular_gateway(db, raw, mac, ts, latency_ms=None):
+def _persist_cellular_gateway(db, raw, mac, ts):
+    # Same split as _persist_primary_gateway: this device owns no WAN Path
+    # (see CONTEXT.md), and its own former byte-rate/latency columns here
+    # are no longer written -- only device metrics and its SIM carrier.
     sys_stats = raw.get("sys_stats") or {}
     system_stats = raw.get("system-stats") or {}
     mbb = raw.get("mbb") or {}
     sim = next((s for s in (mbb.get("sim") or []) if s.get("active")), None) or {}
     carrier = sim.get("spn")
-    rx_total = int(sim["rxbytes"]) if sim.get("rxbytes") else None
-    tx_total = int(sim["txbytes"]) if sim.get("txbytes") else None
-
-    prev = db.execute(
-        "SELECT ts, wan_rx_bytes_total, wan_tx_bytes_total FROM gateway_stats "
-        "WHERE gateway_mac = ? ORDER BY ts DESC LIMIT 1",
-        (mac,),
-    ).fetchone()
-    rx_rate = tx_rate = None
-    if prev and prev[1] is not None and rx_total is not None:
-        elapsed = (datetime.fromisoformat(ts) - datetime.fromisoformat(prev[0])).total_seconds()
-        if elapsed > 0:
-            drx, dtx = rx_total - prev[1], (tx_total or 0) - (prev[2] or 0)
-            if drx >= 0:
-                rx_rate = int(drx * 8 / elapsed)
-            if dtx >= 0:
-                tx_rate = int(dtx * 8 / elapsed)
 
     db.execute(
         """
         INSERT OR REPLACE INTO gateway_stats
             (ts, gateway_mac, gateway_kind, gateway_name, cpu_pct, mem_pct, load1, load5, load15,
-             uptime_sec, temp_cpu, temp_local, temp_phy, wan_rx_rate_bps, wan_tx_rate_bps,
-             wan_rx_bytes_total, wan_tx_bytes_total, carrier, wan_latency_ms)
-        VALUES (?, ?, 'cellular', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?)
+             uptime_sec, carrier)
+        VALUES (?, ?, 'cellular', ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (ts, mac, raw.get("name"),
          _f(system_stats.get("cpu")), _f(system_stats.get("mem")),
          _f(sys_stats.get("loadavg_1")), _f(sys_stats.get("loadavg_5")), _f(sys_stats.get("loadavg_15")),
-         raw.get("uptime"), rx_rate, tx_rate, rx_total, tx_total, carrier, latency_ms),
+         raw.get("uptime"), carrier),
     )
 
 
 def _persist_rtt_monitors(db, gw_raw, ts):
+    """rtt_monitors predates the wan_path_id refactor and is still keyed on
+    a legacy gateway_kind column (see handle_rtt_history) -- Task 9 gives it
+    a real wan_path_id. Until then, derive that legacy label from each
+    discovered WAN Path's is_cellular flag rather than a hardcoded key, so
+    this no longer depends on the WAN key literally being "WAN"/"WAN3"."""
+    from .wan import discover_wan_paths
+
     uptime_stats = gw_raw.get("uptime_stats") or {}
-    for path, kind in WAN_PATH_KINDS.items():
-        for m in wan_monitors(uptime_stats.get(path) or {}):
+    for path in discover_wan_paths(gw_raw):
+        kind = "cellular" if path.is_cellular else "primary"
+        for m in wan_monitors(uptime_stats.get(path.key) or {}):
             db.execute(
                 """
                 INSERT OR REPLACE INTO rtt_monitors

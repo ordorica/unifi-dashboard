@@ -32,6 +32,7 @@ from aiohttp import web, WSMsgType
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from unifi_lib import db, persist
 from unifi_lib.fetch import UnifiSession
+from unifi_lib.wan import discover_wan_paths
 
 HERE = Path(__file__).resolve().parent
 STATIC_DIR = HERE / "static"
@@ -91,14 +92,21 @@ def _uptime_from_assoc(assoc_time):
     return elapsed if elapsed >= 0 else None
 
 
-def build_gateway_tick(raw: dict, kind: str) -> dict:
+def build_gateway_tick(raw: dict) -> dict:
+    """One Gateway Device's own live numbers. No longer takes a primary/
+    cellular `kind` -- that was a second, independently-set label for what
+    `persist.device_category()` already tells us from the same raw dict, and
+    the two could disagree. The category picked here decides only which
+    *extra* fields this device reports (wired WAN interface temps vs a
+    cellular modem's SIM/carrier); it says nothing about any WAN Path."""
     sys_stats = raw.get("sys_stats") or {}
     system_stats = raw.get("system-stats") or {}
     mac = raw.get("mac")
+    category = persist.device_category(raw)
     base = {
         "mac": mac,
         "name": raw.get("name"),
-        "kind": kind,
+        "category": category,
         "status": persist.device_status(raw),
         "cpu": _f(system_stats.get("cpu")),
         "mem": _f(system_stats.get("mem")),
@@ -107,7 +115,7 @@ def build_gateway_tick(raw: dict, kind: str) -> dict:
         "load15": _f(sys_stats.get("loadavg_15")),
         "uptimeSec": raw.get("uptime"),
     }
-    if kind == "primary":
+    if category == "gateway":
         temps = {t.get("name"): t.get("value") for t in (raw.get("temperatures") or [])}
         wan = raw.get("wan1") or raw.get("wan") or {}
         base.update({
@@ -163,13 +171,14 @@ def _rtt_path(wan: dict, stats: dict) -> dict:
 
 
 def build_rtt_tick(gw_raw: dict) -> dict:
-    """RTT for both WAN paths. The UDM is the authority for both -- wan1 is
-    the wired primary, wan3 the cellular failover (confirmed via
-    active_geo_info.WAN3 resolving to the T-Mobile ASN)."""
+    """RTT for every WAN Path this gateway reports, keyed by wan_key (e.g.
+    "WAN", "WAN3") rather than a hardcoded primary/cellular pair -- that
+    assumed exactly two paths, one of them cellular. The gateway is the
+    authority for all of its own paths' monitors."""
     uptime_stats = gw_raw.get("uptime_stats") or {}
     return {
-        "primary": _rtt_path(gw_raw.get("wan1") or gw_raw.get("wan") or {}, uptime_stats.get("WAN") or {}),
-        "cellular": _rtt_path(gw_raw.get("wan3") or {}, uptime_stats.get("WAN3") or {}),
+        path.key: _rtt_path(gw_raw.get(path.slot) or {}, uptime_stats.get(path.key) or {})
+        for path in discover_wan_paths(gw_raw)
     }
 
 
@@ -260,14 +269,13 @@ async def fast_loop():
                 cat = persist.device_category(raw)
                 uplink = raw.get("uplink") or {}
                 rx_bps = tx_bps = None
-                if cat == "gateway":
-                    gw = build_gateway_tick(raw, "primary")
-                    gateways["primary"] = gw
-                    rtt = build_rtt_tick(raw)
-                    rx_bps, tx_bps = gw["rxRateBps"], gw["txRateBps"]
-                elif cat == "cellular_gateway":
-                    gw = build_gateway_tick(raw, "cellular")
-                    gateways["cellular"] = gw
+                if cat in ("gateway", "cellular_gateway"):
+                    gw = build_gateway_tick(raw)
+                    gateways[gw["mac"]] = gw
+                    if cat == "gateway":
+                        # Only the Gateway Device that owns WAN interfaces
+                        # reports RTT; the cellular modem owns no WAN Path.
+                        rtt = build_rtt_tick(raw)
                     rx_bps, tx_bps = gw["rxRateBps"], gw["txRateBps"]
                 else:
                     if cat == "ap":
@@ -439,24 +447,67 @@ async def handle_wans(request):
 
 
 async def handle_wan_history(request):
-    """Per-WAN throughput and latency history for one WAN Path."""
+    """Throughput and latency history, either for one WAN Path (?wan=) or
+    aggregated across every WAN Path a Gateway Device owns (?mac=).
+
+    The two are mutually exclusive; ?mac only takes effect when ?wan is
+    absent. A Gateway Device's throughput is the aggregate of its WAN Paths
+    -- reviving a per-device throughput column would re-conflate device and
+    path, so ?mac sums rx/tx rates across paths per sample and then averages
+    those per-sample sums within each bucket (summing directly at the bucket
+    level would also sum across the multiple samples inside one bucket,
+    inflating the rate). Latency isn't meaningful summed across paths, so
+    it's returned only when the gateway has exactly one WAN Path, else null.
+    """
     wan_id = request.query.get("wan")
+    mac = request.query.get("mac")
     range_key = request.query.get("range", "7d")
     cutoff, bucket_fmt = _bucket_query(range_key)
     conn = db.connect()
+
+    if wan_id:
+        rows = conn.execute(
+            f"""
+            SELECT strftime('{bucket_fmt}', ts) AS bucket,
+                   AVG(rx_rate_bps), AVG(tx_rate_bps), AVG(latency_ms)
+            FROM wan_stats
+            WHERE wan_path_id = ? AND ts >= ?
+            GROUP BY bucket ORDER BY bucket
+            """,
+            (wan_id, cutoff),
+        ).fetchall()
+        conn.close()
+        return web.json_response([
+            {"t": r[0], "rxRateBps": r[1], "txRateBps": r[2], "latencyMs": r[3]} for r in rows
+        ])
+
+    if not mac:
+        conn.close()
+        return web.json_response([])
+
+    (path_count,) = conn.execute(
+        "SELECT COUNT(*) FROM wan_paths WHERE gateway_mac = ?", (mac,)
+    ).fetchone()
     rows = conn.execute(
         f"""
-        SELECT strftime('{bucket_fmt}', ts) AS bucket,
-               AVG(rx_rate_bps), AVG(tx_rate_bps), AVG(latency_ms)
-        FROM wan_stats
-        WHERE wan_path_id = ? AND ts >= ?
+        SELECT strftime('{bucket_fmt}', per_sample.ts) AS bucket,
+               AVG(per_sample.rx), AVG(per_sample.tx), AVG(per_sample.lat)
+        FROM (
+            SELECT ws.ts AS ts, SUM(ws.rx_rate_bps) AS rx, SUM(ws.tx_rate_bps) AS tx,
+                   AVG(ws.latency_ms) AS lat
+            FROM wan_stats ws JOIN wan_paths wp ON wp.id = ws.wan_path_id
+            WHERE wp.gateway_mac = ? AND ws.ts >= ?
+            GROUP BY ws.ts
+        ) per_sample
         GROUP BY bucket ORDER BY bucket
         """,
-        (wan_id, cutoff),
+        (mac, cutoff),
     ).fetchall()
     conn.close()
     return web.json_response([
-        {"t": r[0], "rxRateBps": r[1], "txRateBps": r[2], "latencyMs": r[3]} for r in rows
+        {"t": r[0], "rxRateBps": r[1], "txRateBps": r[2],
+         "latencyMs": r[3] if path_count == 1 else None}
+        for r in rows
     ])
 
 
@@ -1013,12 +1064,13 @@ async def handle_rtt_history(request):
 
     rtt_monitors predates the wan_path_id refactor (Tasks 2-5) and has no
     wan_path_id column of its own -- it is still keyed on the legacy
-    primary/cellular gateway_kind that persist._persist_rtt_monitors writes
-    via WAN_PATH_KINDS. Adding a real column is a db.py schema change out of
-    scope for this task, so a WAN Path is resolved to that column here via
-    is_cellular (never by wan_key name, per CONTEXT.md). This means two
-    non-cellular WAN Paths on the same gateway cannot be told apart in this
-    table until it gets a proper migration."""
+    primary/cellular gateway_kind that persist._persist_rtt_monitors derives
+    per WAN Path from is_cellular (never by wan_key name, per CONTEXT.md).
+    Adding a real wan_path_id column is a db.py schema change out of scope
+    for this task (see Task 9), so a WAN Path is resolved to that legacy
+    column here via is_cellular too. This means two non-cellular WAN Paths
+    on the same gateway cannot be told apart in this table until it gets a
+    proper migration."""
     wan_id = request.query.get("wan")
     range_key = request.query.get("range", "24h")
     cutoff, bucket_fmt = _bucket_query(range_key)

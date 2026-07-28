@@ -91,6 +91,24 @@ config, usage) is **not** in a loop. It is fetched by a REST handler and memoise
 `state.flow_cache` via `_cached_flow(key, producer)` with a 30s TTL, so multiple
 browser tabs don't hammer the controller.
 
+### WAN Paths vs Gateway Devices
+
+A **WAN Path** is one internet connection (`WAN`, `WAN3`); a **Gateway Device**
+is a physical box. They are not the same thing and must not be merged: here the
+cellular WAN Path is a GRE tunnel on the UDM with no CPU of its own, while the
+cellular modem that does have a CPU owns no WAN Path.
+
+WAN Paths are discovered from `last_wan_interfaces` and given stable synthetic
+ids in `wan_paths` (see `docs/adr/0001-wan-path-identity.md`), so history follows
+the internet service rather than the socket. Per-sample WAN data lives in
+`wan_stats` keyed on that id; device metrics stay in `gateway_stats` keyed on MAC.
+Whether a path is cellular comes from `wan.type`, never from its key name.
+
+Speedtests are attributed by observing `speedtest-status.interface_name` in
+`fast_loop`. The archive carries no WAN field, and `speedtest-status.timestamp`
+is a refresh time rather than a completion time, so timestamp correlation does
+not work. Unattributable speedtests stay NULL — never guessed.
+
 ### Data flow
 
 ```
@@ -183,6 +201,13 @@ should be preserved:
 - `uptime_stats.WAN.monitors` and `.alerting_monitors` are two *different* sets, not a
   fallback pair; read both (`persist.wan_monitors()`). The same host can be probed over
   both ICMP and DNS, so `(target, type)` is the key, not target alone.
+- Which WAN Path a speedtest ran over is not a field on the archived record itself --
+  it has none. Attribution instead observes `speedtest-status.interface_name` live in
+  `fast_loop` and matches it to the archive by exact throughput, since
+  `speedtest-status.timestamp` is a refresh time rather than a completion time and so
+  cannot be correlated by time either. A speedtest that predates observation, or whose
+  reading was missed between polls, stays unattributed (`wan_path_id IS NULL`) rather
+  than being guessed.
 - DPI/QoS application and category IDs come back as bare integers with
   `application_name: null`. Show the numeric id rather than inventing a label.
 - `/api/flows/stats` (whole-period totals) and `/api/flows/recent` (newest ≤1000 flows)
