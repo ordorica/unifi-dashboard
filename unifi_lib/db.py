@@ -184,6 +184,20 @@ def init_db(db: sqlite3.Connection) -> None:
         "ON rtt_monitors(gateway_kind, target, monitor_type, ts)"
     )
 
+    # Migration: attribute a monitor to its owning WAN Path. gateway_kind
+    # stays -- additive-migration rule, and it's part of the primary key --
+    # but it's legacy: it only ever collapses to "primary"/"cellular" and
+    # cannot tell two non-cellular WAN Paths on one gateway apart. wan_path_id
+    # is resolved the same way wan_stats is (see persist._persist_rtt_monitors)
+    # and is what handle_rtt_history keys on. NULL when the owning path can't
+    # be resolved; never guessed from gateway_kind.
+    existing_rtt_cols = {row[1] for row in db.execute("PRAGMA table_info(rtt_monitors)").fetchall()}
+    if "wan_path_id" not in existing_rtt_cols:
+        db.execute("ALTER TABLE rtt_monitors ADD COLUMN wan_path_id INTEGER")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rtt_monitors_wan_path ON rtt_monitors(wan_path_id, ts)"
+    )
+
     # port_stats: per-physical-port bandwidth history for switches and the
     # primary gateway (the only categories with a non-empty port_table).
     db.execute(

@@ -324,26 +324,34 @@ def _persist_cellular_gateway(db, raw, mac, ts):
 
 
 def _persist_rtt_monitors(db, gw_raw, ts):
-    """rtt_monitors predates the wan_path_id refactor and is still keyed on
-    a legacy gateway_kind column (see handle_rtt_history) -- Task 9 gives it
-    a real wan_path_id. Until then, derive that legacy label from each
-    discovered WAN Path's is_cellular flag rather than a hardcoded key, so
-    this no longer depends on the WAN key literally being "WAN"/"WAN3"."""
+    """rtt_monitors is keyed on wan_path_id, resolved the same way
+    persist_wan_stats resolves it -- one resolve_path_ids call for the whole
+    gateway (batch, not per-path: see wan_identity.py), matched to each
+    monitor's WAN by the path's key. gateway_kind stays and is still written
+    (additive-migration rule: it's part of the unchanged primary key), but it
+    is legacy and only ever collapses to "primary"/"cellular" -- it can't
+    tell two non-cellular WAN Paths on one gateway apart, which is exactly
+    why wan_path_id exists. A monitor whose WAN Path can't be resolved writes
+    NULL; it must never fall back to a gateway_kind guess."""
     from .wan import discover_wan_paths
+    from .wan_identity import resolve_path_ids
 
+    mac = gw_raw.get("mac")
     uptime_stats = gw_raw.get("uptime_stats") or {}
-    for path in discover_wan_paths(gw_raw):
+    paths = discover_wan_paths(gw_raw)
+    path_ids = resolve_path_ids(db, mac, paths, ts)
+    for path, path_id in zip(paths, path_ids):
         kind = "cellular" if path.is_cellular else "primary"
         for m in wan_monitors(uptime_stats.get(path.key) or {}):
             db.execute(
                 """
                 INSERT OR REPLACE INTO rtt_monitors
-                    (ts, gateway_kind, target, monitor_type, latency_ms, availability)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (ts, gateway_kind, target, monitor_type, latency_ms, availability, wan_path_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 # 0 = unmeasured, not a real 0ms RTT to an external host.
                 (ts, kind, m.get("target"), m.get("type"),
-                 _f(m.get("latency_average")) or None, _f(m.get("availability"))),
+                 _f(m.get("latency_average")) or None, _f(m.get("availability")), path_id),
             )
 
 

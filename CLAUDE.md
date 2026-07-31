@@ -142,15 +142,29 @@ Two distinct byte-column conventions coexist, and mixing them corrupts the usage
 - `*_rate_bps` — instantaneous rate at that sample.
 - `*_bytes_total` — **monotonic cumulative** counters. `_usage_since()` computes usage
   as a delta between two of these, so never write per-interval deltas into them.
-  The `stat/report` backfill only populates rate columns for exactly this reason.
 
-### Controller history backfill
+### No controller history backfill for WAN throughput
 
-`backfill_gateway_history()` runs once at startup and seeds `gateway_stats` from the
-controller's own `stat/report` rollups, so long-range charts aren't empty after a
-restart. The controller keeps 5-minute data for 24h, hourly for 7d, daily for 30d;
-the backfill takes each row from the finest scope covering it and keeps the regions
-disjoint. It uses `INSERT OR IGNORE` so it never clobbers live rows.
+There is no startup backfill for `wan_stats` (or, since `wan-portability`, for
+`gateway_stats`'s old `wan_*` columns — those columns are still in the schema,
+additive-migration rule, but nothing writes or reads them any more). A prior
+`backfill_gateway_history()` seeded `gateway_stats.wan_rx_rate_bps`/`wan_tx_rate_bps`
+from the controller's `stat/report` rollups at startup, but nothing had read those
+columns since WAN throughput moved to `wan_stats` keyed on `wan_path_id` — it was
+writing data nothing consumed, so it was removed.
+
+It isn't coming back as a `wan_stats` backfill either: `stat/report`'s `gw` scope
+returns gateway-level totals (rx/tx summed across every WAN Path on the device), with
+no per-path breakdown, so a row from it cannot be attributed to a specific WAN Path —
+the same unattributable class as historical speedtests (see "Reporting controller data
+honestly" below). Guessing an attribution (e.g. crediting it all to whichever path
+happens to be first) would misrepresent history for exactly the multi-path gateways
+this project exists to support, so none is invented.
+
+**Consequence:** long-range WAN throughput charts are genuinely sparse right after a
+fresh start (new install, empty DB, or restore) and only fill in as `wan_stats`
+accumulates its own live samples at the normal `PERSIST_INTERVAL` cadence. This is
+expected, not a bug.
 
 ### Network/VLAN mapping
 

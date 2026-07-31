@@ -485,8 +485,21 @@ async def handle_wan_history(request):
         conn.close()
         return web.json_response([])
 
+    # wan_paths is deliberately never pruned (its rows are identity, and
+    # wan_stats history hangs off wan_paths.id -- see db.py), and identity
+    # resolution deliberately fails toward splitting rather than guessing a
+    # merge (wan_identity.py). So a gateway that was ever re-cabled can carry
+    # a retired path row forever alongside its live replacement. A raw
+    # COUNT(*) would see that retired row too, permanently read this gateway
+    # as having 2+ paths, and null out latency below even though it genuinely
+    # has one active path today. Count only paths seen within the same
+    # RETENTION_DAYS window everything else in this schema ages out of --
+    # "active" here means the same thing "not yet pruned" means elsewhere,
+    # rather than inventing a separate threshold.
+    active_cutoff = (datetime.now(timezone.utc) - timedelta(days=db.RETENTION_DAYS)).isoformat()
     (path_count,) = conn.execute(
-        "SELECT COUNT(*) FROM wan_paths WHERE gateway_mac = ?", (mac,)
+        "SELECT COUNT(*) FROM wan_paths WHERE gateway_mac = ? AND last_seen >= ?",
+        (mac, active_cutoff),
     ).fetchone()
     rows = conn.execute(
         f"""
@@ -1058,37 +1071,30 @@ async def handle_wifi_health(request):
 
 
 async def handle_rtt_history(request):
-    """Per-target latency series for one WAN path, one entry per
+    """Per-target latency series for one WAN Path, one entry per
     (target, monitor_type) -- the same host can be probed over both ICMP
     and DNS, and those are separate measurements.
 
-    rtt_monitors predates the wan_path_id refactor (Tasks 2-5) and has no
-    wan_path_id column of its own -- it is still keyed on the legacy
-    primary/cellular gateway_kind that persist._persist_rtt_monitors derives
-    per WAN Path from is_cellular (never by wan_key name, per CONTEXT.md).
-    Adding a real wan_path_id column is a db.py schema change out of scope
-    for this task (see Task 9), so a WAN Path is resolved to that legacy
-    column here via is_cellular too. This means two non-cellular WAN Paths
-    on the same gateway cannot be told apart in this table until it gets a
-    proper migration."""
+    Keyed directly on wan_path_id (see persist._persist_rtt_monitors), which
+    is what tells two non-cellular WAN Paths on the same gateway apart -- the
+    legacy gateway_kind column collapses both to "primary" and can't. A
+    missing or unresolvable ?wan= returns [] rather than a cross-WAN
+    aggregate."""
     wan_id = request.query.get("wan")
+    if not wan_id:
+        return web.json_response([])
     range_key = request.query.get("range", "24h")
     cutoff, bucket_fmt = _bucket_query(range_key)
     conn = db.connect()
-    path = conn.execute("SELECT link_type FROM wan_paths WHERE id = ?", (wan_id,)).fetchone()
-    if not path:
-        conn.close()
-        return web.json_response([])
-    gateway_kind = "cellular" if (path[0] or "").startswith("wireless") else "primary"
     rows = conn.execute(
         f"""
         SELECT target, monitor_type, strftime('{bucket_fmt}', ts) AS bucket,
                AVG(latency_ms), AVG(availability)
-        FROM rtt_monitors WHERE gateway_kind = ? AND ts >= ?
+        FROM rtt_monitors WHERE wan_path_id = ? AND ts >= ?
         GROUP BY target, monitor_type, bucket
         ORDER BY target, monitor_type, bucket
         """,
-        (gateway_kind, cutoff),
+        (wan_id, cutoff),
     ).fetchall()
     conn.close()
 
@@ -1355,58 +1361,18 @@ async def handle_vlans(request):
 # ---------------------------------------------------------------------------
 # App lifecycle
 # ---------------------------------------------------------------------------
-async def backfill_gateway_history(conn) -> int:
-    """Seed gateway_stats from the controller's own rollups.
-
-    Without this, every chart starts empty after a restart and the 7d/14d/30d
-    ranges stay useless until the process has been up that long -- even though
-    the controller already holds the history.
-
-    Resolution degrades with age (the controller keeps 5-minute data for 24h,
-    hourly for 7d, daily for 30d), so each row is taken from the finest scope
-    that still covers it and the regions are kept disjoint to avoid mixing
-    granularities over the same span.
-
-    Only the rate columns are written. The report returns per-interval byte
-    deltas, not the monotonic counters wan_rx_bytes_total holds, and feeding
-    deltas into those would corrupt the usage math in _usage_since().
-    """
-    gw = next((d for d in (state.last_fast or {}).get("devices", [])
-               if persist.device_category(d) == "gateway"), None)
-    if not gw or not gw.get("mac"):
-        return 0
-    mac, name = gw["mac"], gw.get("name")
-
-    now_ms = int(time.time() * 1000)
-    hour_ms, day_ms = 3600 * 1000, 86400 * 1000
-    # (scope, seconds_per_bucket, region_start_ms, region_end_ms)
-    scopes = [
-        ("5minutes.gw", 300, now_ms - 24 * hour_ms, now_ms),
-        ("hourly.gw", 3600, now_ms - 7 * day_ms, now_ms - 24 * hour_ms),
-        ("daily.gw", 86400, now_ms - 30 * day_ms, now_ms - 7 * day_ms),
-    ]
-    inserted = 0
-    for scope, bucket_secs, start_ms, end_ms in scopes:
-        rows = await state.session.fetch_site_report(scope, start_ms, end_ms)
-        for r in rows:
-            t = r.get("time")
-            if not t or not (start_ms <= t < end_ms):
-                continue
-            rx, tx = r.get("wan-rx_bytes"), r.get("wan-tx_bytes")
-            ts = persist.epoch_to_iso(t / 1000)
-            cur = conn.execute(
-                """
-                INSERT OR IGNORE INTO gateway_stats
-                    (ts, gateway_mac, gateway_kind, gateway_name, wan_rx_rate_bps, wan_tx_rate_bps)
-                VALUES (?, ?, 'primary', ?, ?, ?)
-                """,
-                (ts, mac, name,
-                 int(rx * 8 / bucket_secs) if rx else None,
-                 int(tx * 8 / bucket_secs) if tx else None),
-            )
-            inserted += cur.rowcount
-    conn.commit()
-    return inserted
+# There used to be a backfill_gateway_history() here that seeded
+# gateway_stats's wan_rx_rate_bps/wan_tx_rate_bps from the controller's
+# stat/report rollups at startup. Nothing has read those columns since WAN
+# throughput moved to wan_stats (keyed on wan_path_id) -- it was writing data
+# nothing consumed, so it was removed rather than kept as dead weight. There
+# is no equivalent backfill for wan_stats: stat/report's gw scope returns
+# gateway-level totals with no per-path breakdown, so a row from it cannot be
+# attributed to a specific WAN Path (the same unattributable class as
+# historical speedtests -- see "Reporting controller data honestly" in
+# CLAUDE.md). Long-range WAN throughput charts are therefore genuinely sparse
+# right after a fresh start and fill in only as wan_stats accumulates live
+# samples.
 
 
 async def on_startup(app):
@@ -1418,10 +1384,8 @@ async def on_startup(app):
     log.info("networks: %d subnets mapped", n_nets)
     try:
         state.last_fast = await state.session.fetch_fast()
-        n_rows = await backfill_gateway_history(conn)
-        log.info("backfill: %d historical gateway rows imported", n_rows)
     except Exception:
-        log.exception("gateway history backfill failed (continuing without it)")
+        log.exception("initial fast fetch failed (continuing without it)")
     conn.close()
     app["fast_task"] = asyncio.create_task(fast_loop())
     app["persist_task"] = asyncio.create_task(persist_loop())
