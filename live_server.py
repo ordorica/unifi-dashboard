@@ -1075,11 +1075,14 @@ async def handle_rtt_history(request):
     (target, monitor_type) -- the same host can be probed over both ICMP
     and DNS, and those are separate measurements.
 
-    Keyed directly on wan_path_id (see persist._persist_rtt_monitors), which
-    is what tells two non-cellular WAN Paths on the same gateway apart -- the
-    legacy gateway_kind column collapses both to "primary" and can't. A
-    missing or unresolvable ?wan= returns [] rather than a cross-WAN
-    aggregate."""
+    Reads rtt_path_monitors (see persist._persist_rtt_monitors), whose
+    primary key includes wan_path_id -- that's what actually separates two
+    non-cellular WAN Paths on the same gateway probing the same target+type
+    at the same ts into two rows. The legacy rtt_monitors table (kept, not
+    dropped, but no longer written) could not: its primary key's
+    gateway_kind collapses both to "primary" and a shared write would
+    collide. A missing or unresolvable ?wan= returns [] rather than a
+    cross-WAN aggregate."""
     wan_id = request.query.get("wan")
     if not wan_id:
         return web.json_response([])
@@ -1090,7 +1093,7 @@ async def handle_rtt_history(request):
         f"""
         SELECT target, monitor_type, strftime('{bucket_fmt}', ts) AS bucket,
                AVG(latency_ms), AVG(availability)
-        FROM rtt_monitors WHERE wan_path_id = ? AND ts >= ?
+        FROM rtt_path_monitors WHERE wan_path_id = ? AND ts >= ?
         GROUP BY target, monitor_type, bucket
         ORDER BY target, monitor_type, bucket
         """,

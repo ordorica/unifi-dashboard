@@ -324,15 +324,28 @@ def _persist_cellular_gateway(db, raw, mac, ts):
 
 
 def _persist_rtt_monitors(db, gw_raw, ts):
-    """rtt_monitors is keyed on wan_path_id, resolved the same way
-    persist_wan_stats resolves it -- one resolve_path_ids call for the whole
-    gateway (batch, not per-path: see wan_identity.py), matched to each
-    monitor's WAN by the path's key. gateway_kind stays and is still written
-    (additive-migration rule: it's part of the unchanged primary key), but it
-    is legacy and only ever collapses to "primary"/"cellular" -- it can't
-    tell two non-cellular WAN Paths on one gateway apart, which is exactly
-    why wan_path_id exists. A monitor whose WAN Path can't be resolved writes
-    NULL; it must never fall back to a gateway_kind guess."""
+    """Writes rtt_path_monitors, keyed on the real WAN Path identity --
+    resolved the same way persist_wan_stats resolves it: one
+    resolve_path_ids call for the whole gateway (batch, not per-path: see
+    wan_identity.py), matched to each monitor's WAN by the path's key.
+
+    Does NOT write the legacy rtt_monitors table any more. That table's
+    primary key is (ts, gateway_kind, target, monitor_type) -- gateway_kind
+    only ever collapses to "primary"/"cellular", so two non-cellular WAN
+    Paths probing the same target+type at the same ts would silently
+    overwrite each other there (a real collision, not just a query-layer
+    ambiguity -- adding a wan_path_id column to it, as an earlier version of
+    this change did, fixed querying the surviving row but not the
+    collision). rtt_path_monitors has wan_path_id IN its primary key
+    instead, which is what actually prevents the collision. rtt_monitors
+    itself is left in place with its existing rows, same treatment as
+    gateway_stats's old wan_* columns -- not dropped, not backfilled (those
+    rows recorded "primary"/"cellular" and genuinely don't know which path
+    they measured).
+
+    wan_path_id is NOT NULL on rtt_path_monitors: a monitor whose WAN Path
+    can't be resolved is skipped, never written with a placeholder or a
+    gateway_kind guess -- an unattributable RTT sample has no meaning."""
     from .wan import discover_wan_paths
     from .wan_identity import resolve_path_ids
 
@@ -341,17 +354,18 @@ def _persist_rtt_monitors(db, gw_raw, ts):
     paths = discover_wan_paths(gw_raw)
     path_ids = resolve_path_ids(db, mac, paths, ts)
     for path, path_id in zip(paths, path_ids):
-        kind = "cellular" if path.is_cellular else "primary"
+        if path_id is None:
+            continue
         for m in wan_monitors(uptime_stats.get(path.key) or {}):
             db.execute(
                 """
-                INSERT OR REPLACE INTO rtt_monitors
-                    (ts, gateway_kind, target, monitor_type, latency_ms, availability, wan_path_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO rtt_path_monitors
+                    (ts, wan_path_id, target, monitor_type, latency_ms, availability)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 # 0 = unmeasured, not a real 0ms RTT to an external host.
-                (ts, kind, m.get("target"), m.get("type"),
-                 _f(m.get("latency_average")) or None, _f(m.get("availability")), path_id),
+                (ts, path_id, m.get("target"), m.get("type"),
+                 _f(m.get("latency_average")) or None, _f(m.get("availability"))),
             )
 
 

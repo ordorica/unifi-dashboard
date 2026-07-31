@@ -163,9 +163,11 @@ def init_db(db: sqlite3.Connection) -> None:
     if "tx_bytes_total" not in existing_device_stats_cols:
         db.execute("ALTER TABLE device_stats ADD COLUMN tx_bytes_total INTEGER")
 
-    # rtt_monitors: per-target WAN latency history. monitor_type is part of
-    # the key because the same target can be probed two ways (the controller
-    # watches 1.1.1.1 over both ICMP and DNS).
+    # rtt_monitors: per-target WAN latency history, LEGACY and no longer
+    # written (see rtt_path_monitors below) -- kept in place, rows and all,
+    # same treatment as gateway_stats's old wan_* columns (see Task 8/9).
+    # monitor_type is part of the key because the same target can be probed
+    # two ways (the controller watches 1.1.1.1 over both ICMP and DNS).
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS rtt_monitors (
@@ -184,18 +186,50 @@ def init_db(db: sqlite3.Connection) -> None:
         "ON rtt_monitors(gateway_kind, target, monitor_type, ts)"
     )
 
-    # Migration: attribute a monitor to its owning WAN Path. gateway_kind
-    # stays -- additive-migration rule, and it's part of the primary key --
-    # but it's legacy: it only ever collapses to "primary"/"cellular" and
-    # cannot tell two non-cellular WAN Paths on one gateway apart. wan_path_id
-    # is resolved the same way wan_stats is (see persist._persist_rtt_monitors)
-    # and is what handle_rtt_history keys on. NULL when the owning path can't
-    # be resolved; never guessed from gateway_kind.
+    # Migration (now historical): this added wan_path_id to rtt_monitors so
+    # handle_rtt_history could key on it directly instead of bridging ?wan=
+    # through link_type. That still left a write-time collision: gateway_kind
+    # is part of rtt_monitors's primary key and only ever collapses to
+    # "primary"/"cellular", so two non-cellular WAN Paths probing the same
+    # target+type at the same ts would still overwrite each other via
+    # INSERT OR REPLACE -- wan_path_id fixed *querying* the surviving row,
+    # not the collision itself. Fixing that without widening the primary key
+    # (disallowed -- additive-migration rule) meant a new table instead: see
+    # rtt_path_monitors below, which is what's actually written and read now.
+    # This column is consequently redundant, but dropping it would not be
+    # additive, so it stays.
     existing_rtt_cols = {row[1] for row in db.execute("PRAGMA table_info(rtt_monitors)").fetchall()}
     if "wan_path_id" not in existing_rtt_cols:
         db.execute("ALTER TABLE rtt_monitors ADD COLUMN wan_path_id INTEGER")
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_rtt_monitors_wan_path ON rtt_monitors(wan_path_id, ts)"
+    )
+
+    # rtt_path_monitors: per-target WAN latency history keyed on the real
+    # WAN Path identity, not the legacy primary/cellular label -- the
+    # replacement for rtt_monitors (see the migration comment above and
+    # persist._persist_rtt_monitors). wan_path_id is part of the primary key
+    # here (unlike rtt_monitors's gateway_kind), which is what actually
+    # separates two non-cellular WAN Paths probing the same target+type at
+    # the same ts into two rows instead of one clobbering the other.
+    # wan_path_id is NOT NULL: a monitor whose owning path can't be resolved
+    # is skipped rather than written with a placeholder, since an
+    # unattributable RTT sample has no meaning.
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS rtt_path_monitors (
+            ts TEXT NOT NULL,
+            wan_path_id INTEGER NOT NULL,
+            target TEXT NOT NULL,
+            monitor_type TEXT NOT NULL,
+            latency_ms REAL,
+            availability REAL,
+            PRIMARY KEY (ts, wan_path_id, target, monitor_type)
+        )
+        """
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rtt_path_monitors_path_ts ON rtt_path_monitors(wan_path_id, ts)"
     )
 
     # port_stats: per-physical-port bandwidth history for switches and the
@@ -372,6 +406,7 @@ def prune_old(db: sqlite3.Connection, retention_days: int = RETENTION_DAYS) -> N
     db.execute("DELETE FROM device_stats WHERE ts < ?", (cutoff,))
     db.execute("DELETE FROM port_stats WHERE ts < ?", (cutoff,))
     db.execute("DELETE FROM rtt_monitors WHERE ts < ?", (cutoff,))
+    db.execute("DELETE FROM rtt_path_monitors WHERE ts < ?", (cutoff,))
     db.execute("DELETE FROM speedtests WHERE ts < ?", (cutoff,))
     # wan_paths is deliberately NOT pruned here -- it is identity, not a time
     # series, and wan_stats rows above are keyed on wan_paths.id. Pruning
