@@ -807,12 +807,21 @@ function signalColor(dbm) {
   if (dbm >= -80) return "var(--warning)";
   return "var(--critical)";
 }
-// RTT: our wired WAN sits ~10ms and the 5G failover ~50ms, so 30/80 splits
-// "healthy wired", "expected on cellular / mildly degraded", and "bad".
+// RTT thresholds are general network-latency norms, not tuned to any one
+// household's ISPs (a prior 30/80 split was justified by "our wired WAN
+// sits ~10ms and the 5G failover ~50ms" -- exactly the kind of hardcoded
+// assumption this branch removes elsewhere). Real-time interactive traffic
+// (voice/video/gaming) is the standard yardstick for "does latency feel
+// bad": ITU-T G.114 puts one-way voice delay up to ~150ms as generally
+// acceptable, i.e. round-trip figures in that range are still usable, and
+// below ~50ms round-trip is where added latency stops being perceptible at
+// all for most people. So under 50ms reads as good, 50-150ms as noticeable
+// but tolerable, and above 150ms as the point most real-time uses start to
+// suffer -- independent of what any particular WAN Path's own baseline is.
 function latencyColor(ms) {
   if (ms == null) return null;
-  if (ms < 30) return "var(--good)";
-  if (ms < 80) return "var(--warning)";
+  if (ms < 50) return "var(--good)";
+  if (ms < 150) return "var(--warning)";
   return "var(--critical)";
 }
 
@@ -1172,14 +1181,40 @@ let selectedWan = null;
 let lastGwHistory = [];       // WAN Path history (rx/tx/latency) -- follows selectedWan
 let lastDeviceHistory = [];   // Gateway Device history (cpu/mem/load/temp) -- follows the open tile's mac
 let openTile = null;          // { mac, metric } | null
-async function loadWans() {
-  WANS = await fetch("/api/wans").then(r => r.json()).catch(() => []);
+
+// Rebuilds the WAN toggle from a freshly fetched path list, preserving the
+// user's current selection when that path still exists and falling back to
+// the first path otherwise (which also covers the initial selectedWan ===
+// null case).
+function applyWans(wans) {
+  WANS = wans;
+  if (!WANS.some(w => w.id === selectedWan)) {
+    selectedWan = WANS.length ? WANS[0].id : null;
+  }
   const seg = document.getElementById("gatewaySeg");
   // A network with one WAN needs no chooser; zero WANs must still render.
   seg.innerHTML = WANS.length > 1
-    ? WANS.map((w, i) => `<button class="seg-btn2${i ? "" : " active"}" data-wan="${w.id}">${w.label}</button>`).join("")
+    ? WANS.map(w => `<button class="seg-btn2${w.id === selectedWan ? " active" : ""}" data-wan="${w.id}">${w.label}</button>`).join("")
     : "";
-  selectedWan = WANS.length ? WANS[0].id : null;
+}
+async function loadWans() {
+  applyWans(await fetch("/api/wans").then(r => r.json()).catch(() => []));
+}
+// /api/wans returns [] for roughly the first minute after a fresh start
+// (persist_loop writes wan_paths on its own 60s cadence, well after the
+// dashboard can already be open in a browser), so a tab opened in that
+// window would otherwise be stuck with selectedWan permanently null -- no
+// toggle, empty charts -- until a manual reload. The same gap reopens
+// whenever a new WAN Path shows up later. Called from the existing 60s
+// WAN-scoped refresh interval; only touches the DOM/selection when the path
+// set actually changed (or was empty), so it's a no-op on every other tick.
+async function refreshWansIfChanged() {
+  const fresh = await fetch("/api/wans").then(r => r.json()).catch(() => null);
+  if (fresh === null) return;
+  const currentIds = new Set(WANS.map(w => w.id));
+  const sameSet = fresh.length === currentIds.size && fresh.every(w => currentIds.has(w.id));
+  if (WANS.length > 0 && sameSet) return;
+  applyWans(fresh);
 }
 function wanLabel(id) {
   const w = WANS.find(x => x.id === id);
@@ -1262,11 +1297,11 @@ function renderGatewayStats(tick) {
 // it shows as "standby" rather than a bogus 0 ms.
 // ============================================================
 function renderRttSection(tick) {
-  // tick.rtt is keyed by WAN Path key (e.g. "WAN", "WAN3") -- the same
-  // identifier /api/wans exposes as `key` for the selected WAN, so look it
-  // up that way rather than via a primary/cellular label.
-  const selectedWanEntry = WANS.find(w => w.id === selectedWan);
-  const r = (tick.rtt || {})[selectedWanEntry ? selectedWanEntry.key : ""];
+  // tick.rtt is keyed by WAN Path database id -- the same id `selectedWan`
+  // already holds -- not by wan_key (e.g. "WAN"), which two different
+  // gateways can report identically and is not safe to use as a lookup key
+  // once more than one gateway is in play.
+  const r = (tick.rtt || {})[selectedWan];
   const statsEl = document.getElementById("rtt-stats");
   if (!r) {
     statsEl.innerHTML = `<div class="tile"><div class="label">RTT</div><div class="value muted-cell" style="font-size:15px;">Not reported for this gateway</div></div>`;
@@ -3346,6 +3381,12 @@ setInterval(loadWanChart, 60000);
 setInterval(loadSpeedtest, 60000);
 setInterval(loadWanUsage, 60000);
 setInterval(loadRttMonitors, 60000); // matches the persist cadence
+// Re-check the WAN Path list on the same cadence -- heals the empty-toggle
+// state from a browser opened before persist_loop's first cycle, and picks
+// up a WAN Path added later, without requiring a manual reload. The
+// WAN-scoped loaders above already read `selectedWan` fresh each time they
+// fire, so once this sets it there is nothing else to kick.
+setInterval(refreshWansIfChanged, 60000);
 // Flows are expensive controller queries (thousands of rows); the backend
 // memoises them for 30s, so refreshing slower than that is deliberate.
 setInterval(loadFlowStats, 60000);

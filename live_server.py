@@ -66,6 +66,16 @@ class State:
         self.flow_cache: dict[str, tuple[float, object]] = {}  # key -> (fetched_at, payload)
         self.last_rogue_history: float = 0.0  # monotonic clock of last history append
         self.last_speedtest_seen: dict[str, tuple] = {}  # gateway mac -> (ifname, down, up)
+        # gateway_mac -> {wan_key -> wan_paths.id}, refreshed once per
+        # persist_loop cycle (60s). fast_loop needs each WAN Path's stable id
+        # to key the live RTT tick unambiguously (see build_rtt_tick), but
+        # resolving that id is wan_identity.resolve_path_ids -- a DB write,
+        # batched per gateway, meant to run at persist cadence, not every
+        # fast_loop tick. This cache lets fast_loop read the id cheaply
+        # in-memory instead. Empty until the first persist cycle completes,
+        # same "may legitimately be sparse right after a fresh start" class
+        # as everything else keyed on wan_paths.
+        self.wan_path_ids: dict[str, dict[str, int]] = {}
 
 
 state = State()
@@ -170,16 +180,31 @@ def _rtt_path(wan: dict, stats: dict) -> dict:
     }
 
 
-def build_rtt_tick(gw_raw: dict) -> dict:
-    """RTT for every WAN Path this gateway reports, keyed by wan_key (e.g.
-    "WAN", "WAN3") rather than a hardcoded primary/cellular pair -- that
-    assumed exactly two paths, one of them cellular. The gateway is the
-    authority for all of its own paths' monitors."""
+def build_rtt_tick(gw_raw: dict, path_ids: dict[str, int]) -> dict:
+    """RTT for every WAN Path this gateway reports, keyed by the WAN Path's
+    stable database id (the same id /api/wans exposes) rather than its raw
+    wan_key (e.g. "WAN", "WAN3") or a hardcoded primary/cellular pair.
+
+    wan_key alone is not a safe dict key across gateways: two gateways can
+    both report a path under "WAN", and merging their tick contributions into
+    one flat dict by wan_key would let one silently overwrite the other's
+    reading. The database id is globally unique, so a flat dict keyed on it
+    is unambiguous no matter how many gateways contribute.
+
+    `path_ids` is this gateway's slice of state.wan_path_ids (wan_key -> id),
+    populated by persist_loop's identity resolution -- resolving it here
+    per-tick would mean a DB write every second (see wan_identity.py). A path
+    with no id yet (first ~60s after a fresh start, or a WAN Path persist_loop
+    hasn't seen yet) is skipped; its RTT appears once persist_loop catches up.
+    """
     uptime_stats = gw_raw.get("uptime_stats") or {}
-    return {
-        path.key: _rtt_path(gw_raw.get(path.slot) or {}, uptime_stats.get(path.key) or {})
-        for path in discover_wan_paths(gw_raw)
-    }
+    out = {}
+    for path in discover_wan_paths(gw_raw):
+        path_id = path_ids.get(path.key)
+        if path_id is None:
+            continue
+        out[path_id] = _rtt_path(gw_raw.get(path.slot) or {}, uptime_stats.get(path.key) or {})
+    return out
 
 
 def build_ap_tick(raw: dict) -> list[dict]:
@@ -272,10 +297,16 @@ async def fast_loop():
                 if cat in ("gateway", "cellular_gateway"):
                     gw = build_gateway_tick(raw)
                     gateways[gw["mac"]] = gw
-                    if cat == "gateway":
-                        # Only the Gateway Device that owns WAN interfaces
-                        # reports RTT; the cellular modem owns no WAN Path.
-                        rtt = build_rtt_tick(raw)
+                    # Merge rather than overwrite: with two+ gateways in
+                    # `devices`, reassigning `rtt` here on every iteration
+                    # would let the last gateway's paths silently replace an
+                    # earlier gateway's. build_rtt_tick now keys its output on
+                    # each WAN Path's globally-unique database id, so merging
+                    # dicts across gateways is safe. Either category may own
+                    # a WAN Path (see CONTEXT.md) -- discover_wan_paths(raw)
+                    # returns [] when this device has none, so calling it
+                    # unconditionally for both is correct, not just harmless.
+                    rtt.update(build_rtt_tick(raw, state.wan_path_ids.get(gw["mac"], {})))
                     rx_bps, tx_bps = gw["rxRateBps"], gw["txRateBps"]
                 else:
                     if cat == "ap":
@@ -354,6 +385,22 @@ async def persist_loop():
                 "FROM clients WHERE is_online = 0 ORDER BY last_seen DESC"
             ).fetchall()
             state.vendor_cache = dict(conn.execute("SELECT mac, vendor FROM clients WHERE vendor IS NOT NULL").fetchall())
+
+            # Refresh fast_loop's wan_key -> id cache from what persist_wan_stats
+            # just resolved/wrote, so build_rtt_tick can key the live RTT tick
+            # on a WAN Path's stable id without a per-tick DB write. If a
+            # wan_key is somehow duplicated on one gateway (a retired,
+            # never-pruned path row sharing a key with its live replacement --
+            # see wan_identity.py), ordering by last_seen ascending means the
+            # most-recently-seen row wins the cache entry, which is the one
+            # fast_loop's current tick data actually corresponds to.
+            path_rows = conn.execute(
+                "SELECT gateway_mac, wan_key, id FROM wan_paths ORDER BY last_seen ASC"
+            ).fetchall()
+            new_path_ids: dict[str, dict[str, int]] = {}
+            for gw_mac, wan_key, path_id in path_rows:
+                new_path_ids.setdefault(gw_mac, {})[wan_key] = path_id
+            state.wan_path_ids = new_path_ids
             conn.close()
 
             await broadcast({
@@ -431,17 +478,31 @@ def _bucket_query(range_key: str) -> tuple[str, str]:
 
 
 async def handle_wans(request):
-    """Discovered WAN Paths with their stable ids. May legitimately be empty."""
+    """Discovered WAN Paths with their stable ids. May legitimately be empty.
+
+    Scoped to paths seen within the retention window, the same convention
+    handle_wan_history's path_count already uses -- wan_paths is identity and
+    is deliberately never pruned (see db.py), so a gateway that was re-cabled
+    once keeps its retired path row forever. Without this filter every
+    re-cabling would leave a permanent phantom toggle button pointing at a
+    path with no current data.
+    """
+    active_cutoff = (datetime.now(timezone.utc) - timedelta(days=db.RETENTION_DAYS)).isoformat()
     conn = db.connect()
     rows = conn.execute(
-        "SELECT id, wan_key, ifname, link_type, isp_name, asn, label_override "
-        "FROM wan_paths ORDER BY id"
+        "SELECT id, wan_key, ifname, link_type, isp_name, asn, label_override, gateway_mac "
+        "FROM wan_paths WHERE last_seen >= ? ORDER BY id",
+        (active_cutoff,),
     ).fetchall()
     conn.close()
     return web.json_response([
         {"id": r[0], "key": r[1], "ifname": r[2], "linkType": r[3],
          "isCellular": bool(r[3] and r[3].startswith("wireless")),
-         "asn": r[5], "label": r[6] or r[4] or r[2] or r[1]}
+         "asn": r[5], "label": r[6] or r[4] or r[2] or r[1],
+         # Exposed so the frontend can scope by owning gateway -- its
+         # absence was what let two gateways' identically-keyed WAN Paths
+         # collide invisibly in the live RTT tick before wan_path_id keying.
+         "gatewayMac": r[7]}
         for r in rows
     ])
 

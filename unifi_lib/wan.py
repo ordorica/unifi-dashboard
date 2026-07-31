@@ -26,10 +26,21 @@ class WanPath:
     label: str
 
 
-def _slot_for(key: str) -> str:
-    """"WAN" -> "wan1", "WAN3" -> "wan3". The controller's own convention."""
+def _slot_for(key: str) -> str | None:
+    """"WAN" -> "wan1", "WAN3" -> "wan3". The controller's own convention.
+
+    Returns None for a key that doesn't conform (e.g. "WANX") so the caller
+    can skip it. A non-numeric, non-"WAN" key has no known slot to read --
+    defaulting it to "wan1" would silently hand it wan1's ifname, link_type,
+    latency, byte totals and is_cellular, which is measured data about a
+    different path, not a theoretical worst case. Unreachable for conforming
+    firmware is not the same as impossible on networks this project exists
+    to support without guessing.
+    """
+    if key == "WAN":
+        return "wan1"
     suffix = key[3:]
-    return f"wan{suffix}" if suffix.isdigit() else "wan1"
+    return f"wan{suffix}" if suffix.isdigit() else None
 
 
 def discover_wan_paths(raw: dict) -> list[WanPath]:
@@ -44,6 +55,8 @@ def discover_wan_paths(raw: dict) -> list[WanPath]:
     paths = []
     for key in inventory:
         slot = _slot_for(key)
+        if slot is None:
+            continue
         wan = raw.get(slot) or {}
         info = geo.get(key) or {}
         ifname = wan.get("ifname") or ""

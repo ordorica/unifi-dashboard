@@ -223,8 +223,6 @@ def persist_devices_and_gateways(db: sqlite3.Connection, devices: list[dict], ts
         if category == "gateway":
             _persist_primary_gateway(db, raw, mac, ts)
             _persist_port_stats(db, raw, mac, ts)
-            # The UDM is the authority for all of its WAN paths' monitors.
-            _persist_rtt_monitors(db, raw, ts)
         elif category == "cellular_gateway":
             _persist_cellular_gateway(db, raw, mac, ts)
         else:
@@ -238,6 +236,16 @@ def persist_devices_and_gateways(db: sqlite3.Connection, devices: list[dict], ts
                 # Only switches and the gateway expose a real port_table
                 # (APs/cellular gateway have an empty one).
                 _persist_port_stats(db, raw, mac, ts)
+
+        if category in ("gateway", "cellular_gateway"):
+            # Either category may be the authority for WAN paths' monitors --
+            # a Cellular Modem's hardware says nothing about whether it
+            # happens to own a WAN Path (see CONTEXT.md); on a umr-only
+            # network it can. discover_wan_paths(raw) returns [] when this
+            # device has no last_wan_interfaces, so calling it unconditionally
+            # for both categories is safe and is what makes a umr-only
+            # network's RTT show up at all.
+            _persist_rtt_monitors(db, raw, ts)
 
 
 def persist_wan_stats(db: sqlite3.Connection, devices: list[dict], ts: str) -> int:
@@ -442,8 +450,9 @@ def record_speedtest_observation(db: sqlite3.Connection, raw: dict, ts: str) -> 
     return cur.rowcount > 0
 
 
-def persist_speedtests(db: sqlite3.Connection, speedtests: list[dict]) -> int:
-    """Insert archived speedtests, attributing each to a WAN Path when possible.
+def _match_speedtest_path(db: sqlite3.Connection, down, up) -> int | None:
+    """The WAN Path id a speedtest of this exact throughput ran over, or
+    None when that can't be determined uniquely.
 
     The archive carries no WAN field, so attribution comes from matching an
     observed speedtest-status reading on exact throughput. The join is
@@ -453,6 +462,67 @@ def persist_speedtests(db: sqlite3.Connection, speedtests: list[dict]) -> int:
     recorded before gateway_mac existed have it NULL and will not match
     here; that is correct, not a regression -- an unattributable speedtest
     stays NULL rather than being guessed, which is what this replaced.
+
+    The controller emits round throughput values (450.0/65.0 Mbps are real
+    examples), so two distinct WAN Paths on one gateway can plausibly report
+    byte-identical throughput on the same cycle -- fetchone() would then pick
+    one of the two arbitrarily. Attribute only when the join yields exactly
+    one candidate, the same rule wan_identity.py's _find_match follows for
+    identity resolution.
+    """
+    rows = db.execute(
+        "SELECT p.id FROM speedtest_observations o "
+        "JOIN wan_paths p ON p.ifname = o.ifname AND p.gateway_mac = o.gateway_mac "
+        "WHERE o.xput_download = ? AND o.xput_upload = ?",
+        (down, up),
+    ).fetchall()
+    return rows[0][0] if len(rows) == 1 else None
+
+
+def _heal_unattributed_speedtests(db: sqlite3.Connection) -> None:
+    """Re-attempt attribution for every speedtests row still stuck at
+    wan_path_id IS NULL.
+
+    On a fresh deployment, slow_loop archives the whole 24h speedtest window
+    at t~=0 -- before persist_loop has written a single wan_paths row, which
+    happens on its own, later ~60s cycle. Every row from that window inserts
+    with wan_path_id NULL below, and because the INSERT is OR IGNORE, an
+    already-archived row is never revisited by the insert path itself once
+    its ts is taken -- it would stay NULL forever even after the matching
+    WAN Path (and observation) exist. Re-running the same join here on every
+    call heals those rows once the data they need shows up; it is a no-op
+    once nothing is NULL. Same exactly-one-match rule as
+    _match_speedtest_path -- a row that still joins ambiguously, or not at
+    all, is left NULL rather than guessed.
+    """
+    db.execute(
+        """
+        UPDATE speedtests
+        SET wan_path_id = (
+            SELECT p.id FROM speedtest_observations o
+            JOIN wan_paths p ON p.ifname = o.ifname AND p.gateway_mac = o.gateway_mac
+            WHERE o.xput_download = speedtests.download_mbps
+              AND o.xput_upload = speedtests.upload_mbps
+        )
+        WHERE wan_path_id IS NULL
+          AND (
+            SELECT COUNT(*) FROM speedtest_observations o
+            JOIN wan_paths p ON p.ifname = o.ifname AND p.gateway_mac = o.gateway_mac
+            WHERE o.xput_download = speedtests.download_mbps
+              AND o.xput_upload = speedtests.upload_mbps
+          ) = 1
+        """
+    )
+
+
+def persist_speedtests(db: sqlite3.Connection, speedtests: list[dict]) -> int:
+    """Insert archived speedtests, attributing each to a WAN Path when possible,
+    then heal any previously-inserted row that is still unattributed.
+
+    See _match_speedtest_path for how a single row is attributed and
+    _heal_unattributed_speedtests for why a second pass over already-archived
+    rows is necessary -- INSERT OR IGNORE means the insert loop below only
+    ever gets one attempt at a given ts.
     """
     inserted = 0
     for st in speedtests:
@@ -462,18 +532,14 @@ def persist_speedtests(db: sqlite3.Connection, speedtests: list[dict]) -> int:
         down, up, lat = st.get("xput_download"), st.get("xput_upload"), st.get("latency")
         if not down and not up:
             continue  # zero-value glitch rows the controller occasionally logs
-        row = db.execute(
-            "SELECT p.id FROM speedtest_observations o "
-            "JOIN wan_paths p ON p.ifname = o.ifname AND p.gateway_mac = o.gateway_mac "
-            "WHERE o.xput_download = ? AND o.xput_upload = ?",
-            (down, up),
-        ).fetchone()
+        path_id = _match_speedtest_path(db, down, up)
         cur = db.execute(
             "INSERT OR IGNORE INTO speedtests (ts, download_mbps, upload_mbps, latency_ms, "
             "wan_path_id) VALUES (?, ?, ?, ?, ?)",
-            (epoch_to_iso(ts_ms / 1000), down, up, lat, row[0] if row else None),
+            (epoch_to_iso(ts_ms / 1000), down, up, lat, path_id),
         )
         inserted += cur.rowcount
+    _heal_unattributed_speedtests(db)
     return inserted
 
 
