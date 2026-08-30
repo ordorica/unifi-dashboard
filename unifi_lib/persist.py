@@ -434,9 +434,9 @@ def record_speedtest_observation(db: sqlite3.Connection, raw: dict, ts: str) -> 
     value, so it must be sampled often enough to catch back-to-back tests.
     The gateway's own MAC is recorded alongside it so attribution can be
     scoped per gateway -- two gateways can report the same ifname, and a
-    replaced gateway's wan_paths rows are never pruned, so ifname alone is
-    not a safe join key. Returns True when this reading was not already
-    recorded.
+    replaced gateway's wan_paths rows are never pruned by age, so ifname
+    alone is not a safe join key. Returns True when this reading was not
+    already recorded.
     """
     st = raw.get("speedtest-status") or {}
     ifname, down, up = st.get("interface_name"), st.get("xput_download"), st.get("xput_upload")
@@ -457,8 +457,8 @@ def _match_speedtest_path(db: sqlite3.Connection, down, up) -> int | None:
     The archive carries no WAN field, so attribution comes from matching an
     observed speedtest-status reading on exact throughput. The join is
     scoped by gateway_mac as well as ifname -- two gateways can share an
-    ifname, and wan_paths rows are never pruned, so ifname alone can match
-    the wrong (possibly decommissioned) gateway's path. Observations
+    ifname, and wan_paths rows are never pruned by age, so ifname alone can
+    match the wrong (possibly decommissioned) gateway's path. Observations
     recorded before gateway_mac existed have it NULL and will not match
     here; that is correct, not a regression -- an unattributable speedtest
     stays NULL rather than being guessed, which is what this replaced.
