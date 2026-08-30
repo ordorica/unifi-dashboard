@@ -455,6 +455,48 @@ def delete_device(db: sqlite3.Connection, mac: str) -> None:
     db.execute("DELETE FROM devices WHERE mac = ?", (mac,))
 
 
+def sweep_absent_devices(db: sqlite3.Connection, seen_device_count: int) -> list[str]:
+    """Mark devices the controller has stopped reporting, then delete the
+    ones it stopped reporting a week ago. Returns the MACs deleted.
+
+    Must run *after* persist_devices_and_gateways within the same
+    transaction, so every device present in this cycle already carries a
+    fresh `updated_at` and cannot be caught by either threshold.
+
+    Absence is stored rather than computed from the live device list because
+    `state.last_fast` is None immediately after a restart -- a set-difference
+    approach would briefly consider every device absent. `status` self-heals:
+    when the device comes back, the normal upsert overwrites 'absent' with
+    'online'/'offline' with no special handling anywhere.
+    """
+    # A controller returning an empty inventory -- expired credentials, an API
+    # change, a permissions change -- would otherwise mark every device absent
+    # within ten minutes and delete every device and all its history a week
+    # later. The grace period alone does not cover this, because the empty
+    # response repeats on every cycle. Refusing to act on a zero-device poll
+    # is the difference between "the dashboard looks broken until you fix the
+    # credentials" and "the dashboard destroyed your history while you were
+    # away".
+    if seen_device_count <= 0:
+        return []
+
+    now = datetime.now(timezone.utc)
+    absent_cutoff = (now - timedelta(minutes=DEVICE_ABSENT_AFTER_MINUTES)).isoformat()
+    delete_cutoff = (now - timedelta(days=DEVICE_ABSENCE_DAYS)).isoformat()
+
+    db.execute(
+        "UPDATE devices SET status = 'absent' WHERE updated_at < ? AND status != 'absent'",
+        (absent_cutoff,),
+    )
+
+    doomed = [r[0] for r in db.execute(
+        "SELECT mac FROM devices WHERE updated_at < ?", (delete_cutoff,)
+    ).fetchall()]
+    for mac in doomed:
+        delete_device(db, mac)
+    return doomed
+
+
 def prune_old(db: sqlite3.Connection, retention_days: int = RETENTION_DAYS) -> None:
     cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
     db.execute("DELETE FROM gateway_stats WHERE ts < ?", (cutoff,))
