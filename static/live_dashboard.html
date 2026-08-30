@@ -103,6 +103,9 @@
 
   .status-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
   .status-dot.online { background: var(--good); } .status-dot.offline { background: var(--critical); }
+  .status-dot.absent { background: var(--warning); }
+  .icon-btn { background: none; border: none; padding: 2px 4px; cursor: pointer; font-size: 13px; line-height: 1; color: var(--text-muted); border-radius: 4px; }
+  .icon-btn:hover { color: var(--critical); background: var(--grid); }
 
   table { width: 100%; border-collapse: collapse; background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; font-size: 13px; }
   thead th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); font-weight: 600; padding: 10px 14px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
@@ -362,6 +365,7 @@
       <th data-key="parent" style="cursor:pointer;">Parent<span class="arrow" style="opacity:.4; margin-left:3px; font-size:10px;">↕</span></th>
       <th data-key="rxBps" style="cursor:pointer;">Download<span class="arrow" style="opacity:.4; margin-left:3px; font-size:10px;">↕</span></th>
       <th data-key="txBps" style="cursor:pointer;">Upload<span class="arrow" style="opacity:.4; margin-left:3px; font-size:10px;">↕</span></th>
+      <th style="width:1%;"></th>
     </tr></thead>
       <tbody id="ov-device-tbody"></tbody></table>
   </div>
@@ -1498,11 +1502,12 @@ function renderDeviceTable(devices) {
       <td class="muted-cell">${d.parentMac ? `<span class="device-link" data-jump-mac="${d.parentMac}" style="cursor:pointer; text-decoration:underline dotted;">${d.parent || d.parentMac}</span>` : (d.parent || "—")}</td>
       <td class="mono">${fmtBits(d.rxBps)}</td>
       <td class="mono">${fmtBits(d.txBps)}</td>
+      <td>${d.status === "absent" ? `<button class="icon-btn device-delete" data-del-mac="${d.mac}" title="Delete this device and all its history">🗑</button>` : ""}</td>
     </tr>`;
     if (openDeviceRow === d.mac) {
       const safeId = safeMacId(d.mac);
       html += `
-      <tr class="vlan-detail"><td colspan="9"><div class="drill-inner">
+      <tr class="vlan-detail"><td colspan="10"><div class="drill-inner">
         <div class="drill-title">Port stats <span class="muted-cell" style="font-size:11px; font-weight:500;">(click a port for its history)</span></div>
         ${renderPortsTable(d.mac, d.ports)}
         <div class="drill-title" style="margin-top:14px;">Bandwidth history</div>
@@ -1521,6 +1526,7 @@ function renderDeviceTable(devices) {
   document.querySelectorAll("#ov-device-tbody tr.clickable[data-mac]").forEach(tr => {
     tr.addEventListener("click", e => {
       if (e.target.closest(".device-link")) return;
+      if (e.target.closest(".device-delete")) return;
       const mac = tr.dataset.mac;
       openDeviceRow = openDeviceRow === mac ? null : mac;
       renderDeviceTable(devices);
@@ -1528,6 +1534,26 @@ function renderDeviceTable(devices) {
   });
   document.querySelectorAll("#ov-device-tbody .device-link").forEach(el => {
     el.addEventListener("click", e => { e.stopPropagation(); jumpToDevice(el.dataset.jumpMac); });
+  });
+  document.querySelectorAll("#ov-device-tbody .device-delete").forEach(el => {
+    el.addEventListener("click", async e => {
+      e.stopPropagation();
+      const mac = el.dataset.delMac;
+      const dev = (lastDevices || []).find(d => d.mac === mac);
+      const label = dev && dev.name ? `${dev.name} (${mac})` : mac;
+      if (!confirm(`Delete ${label} and all of its stored history?\n\nThis cannot be undone.`)) return;
+      el.disabled = true;
+      const res = await fetch(`/api/devices/${encodeURIComponent(mac)}`, { method: "DELETE" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        el.disabled = false;
+        alert(`Could not delete ${label}: ${body.error || res.status}`);
+        return;
+      }
+      lastDevices = (lastDevices || []).filter(d => d.mac !== mac);
+      if (openDeviceRow === mac) openDeviceRow = null;
+      renderDeviceTable(lastDevices);
+    });
   });
 
   if (openDeviceRow) {
