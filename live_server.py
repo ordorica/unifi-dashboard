@@ -1439,6 +1439,37 @@ async def handle_devices(request):
     ])
 
 
+async def handle_device_delete(request):
+    """Remove an absent device and its history on request.
+
+    The `absent` precondition is the safety property, not a convenience. This
+    dashboard is published to the LAN without authentication and every other
+    route is read-only, so this is the one request that can destroy data. A
+    device the controller has stopped reporting for DEVICE_ABSENT_AFTER_MINUTES
+    is the only thing it is allowed to touch; a live device's history cannot be
+    reached through it at all.
+    """
+    mac = request.match_info["mac"]
+    conn = db.connect()
+    try:
+        row = conn.execute("SELECT status FROM devices WHERE mac = ?", (mac,)).fetchone()
+        if row is None:
+            return web.json_response({"error": "unknown device"}, status=404)
+        if row[0] != "absent":
+            return web.json_response(
+                {"error": "device is not absent", "status": row[0]}, status=409)
+        db.delete_device(conn, mac)
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Drop it from the tick cache too, or it reappears for up to 60s until
+    # the next persist cycle rebuilds the list.
+    state.absent_devices = [d for d in state.absent_devices if d["mac"] != mac]
+    log.info("Device %s deleted by request", mac)
+    return web.json_response({"deleted": mac})
+
+
 async def handle_networks(request):
     """Network names known to the controller, so the UI can colour and filter
     by the real VLAN set instead of a hardcoded copy."""
@@ -1507,6 +1538,7 @@ def build_app() -> web.Application:
     app.router.add_get("/", handle_index)
     app.router.add_get("/ws", handle_ws)
     app.router.add_get("/api/devices", handle_devices)
+    app.router.add_delete("/api/devices/{mac}", handle_device_delete)
     app.router.add_get("/api/vlans", handle_vlans)
     app.router.add_get("/api/networks", handle_networks)
     app.router.add_get("/api/wans", handle_wans)
