@@ -76,6 +76,14 @@ class State:
         # same "may legitimately be sparse right after a fresh start" class
         # as everything else keyed on wan_paths.
         self.wan_path_ids: dict[str, dict[str, int]] = {}
+        # Devices the sweep has marked absent, shaped like a tick entry and
+        # refreshed once per persist_loop cycle (60s). fast_loop builds
+        # tick["devices"] purely from the live controller fetch, so a device
+        # forgotten on the controller drops out of the table the instant it
+        # is removed -- never rendering as absent, and never offering its own
+        # delete button. This cache merges those rows back in without a DB
+        # read on every 1s tick, the same trade-off as wan_path_ids above.
+        self.absent_devices: list[dict] = []
 
 
 state = State()
@@ -328,6 +336,12 @@ async def fast_loop():
                     "rxBps": rx_bps, "txBps": tx_bps, "ports": ports,
                 })
 
+            # Absent devices are appended, never merged over a live entry: if
+            # a device reappears mid-cycle it is in fast["devices"] already,
+            # and the cache is up to 60s stale.
+            live_macs = {d["mac"] for d in devices}
+            devices.extend(d for d in state.absent_devices if d["mac"] not in live_macs)
+
             tick = {
                 "type": "tick", "ts": persist.now_iso(),
                 "gateways": gateways, "aps": aps, "devices": devices, "rtt": rtt,
@@ -393,6 +407,16 @@ async def persist_loop():
                 "FROM clients WHERE is_online = 0 ORDER BY last_seen DESC"
             ).fetchall()
             state.vendor_cache = dict(conn.execute("SELECT mac, vendor FROM clients WHERE vendor IS NOT NULL").fetchall())
+            state.absent_devices = [
+                {"mac": r[0], "name": r[1], "model": r[2], "category": r[3],
+                 "status": "absent", "uptimeSec": None, "ip": r[4],
+                 "parent": r[5], "parentMac": None,
+                 "rxBps": None, "txBps": None, "ports": []}
+                for r in conn.execute(
+                    "SELECT mac, name, model, category, ip, parent_name "
+                    "FROM devices WHERE status = 'absent'"
+                ).fetchall()
+            ]
 
             # Refresh fast_loop's wan_key -> id cache from what persist_wan_stats
             # just resolved/wrote, so build_rtt_tick can key the live RTT tick
