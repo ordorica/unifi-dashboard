@@ -482,7 +482,7 @@ async def handle_wans(request):
 
     Scoped to paths seen within the retention window, the same convention
     handle_wan_history's path_count already uses -- wan_paths is identity and
-    is deliberately never pruned (see db.py), so a gateway that was re-cabled
+    is deliberately never pruned by age (see db.py), so a gateway that was re-cabled
     once keeps its retired path row forever. Without this filter every
     re-cabling would leave a permanent phantom toggle button pointing at a
     path with no current data.
@@ -546,7 +546,7 @@ async def handle_wan_history(request):
         conn.close()
         return web.json_response([])
 
-    # wan_paths is deliberately never pruned (its rows are identity, and
+    # wan_paths is deliberately never pruned by age (its rows are identity, and
     # wan_stats history hangs off wan_paths.id -- see db.py), and identity
     # resolution deliberately fails toward splitting rather than guessing a
     # merge (wan_identity.py). So a gateway that was ever re-cabled can carry

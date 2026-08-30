@@ -12,6 +12,14 @@ DB_FILE = Path(os.environ.get("UNIFI_DB_PATH")
                or Path(__file__).resolve().parent.parent / "unifi_clients.db")
 RETENTION_DAYS = 30
 
+# How long the controller must stop reporting a device before the dashboard
+# says so, and before it removes the device entirely. Ten minutes rather than
+# a single 60s cycle so a brief blip does not flap rows in and out of the
+# table; seven days so a device unplugged for a long weekend, or a controller
+# outage over a holiday, still has room to come back before anything is lost.
+DEVICE_ABSENT_AFTER_MINUTES = 10
+DEVICE_ABSENCE_DAYS = 7
+
 
 def connect() -> sqlite3.Connection:
     db = sqlite3.connect(DB_FILE, timeout=10)
@@ -334,8 +342,10 @@ def init_db(db: sqlite3.Connection) -> None:
     # wan_paths: identity table for WAN Paths (one internet connection, as
     # the controller reports it via its own inventory key such as `WAN` or
     # `WAN3`) -- distinct from the Gateway Device that owns it. This is
-    # deliberately NOT a time series and is never pruned: history is keyed
-    # on wan_paths.id via wan_stats, so pruning identities would orphan that
+    # deliberately NOT a time series and is never pruned by age
+    # (`delete_device` still removes a gateway's paths when the gateway
+    # itself is removed from the controller): history is keyed on
+    # wan_paths.id via wan_stats, so pruning identities would orphan that
     # history. See CONTEXT.md for the WAN Path / Gateway Device distinction.
     db.execute(
         """
@@ -399,6 +409,52 @@ def init_db(db: sqlite3.Connection) -> None:
     db.commit()
 
 
+def delete_device(db: sqlite3.Connection, mac: str) -> None:
+    """Remove one device and every row keyed to it.
+
+    Children first, parent last. The WAN Path steps match nothing for a
+    switch or an AP -- they own no paths and write no gateway_stats -- so one
+    code path serves every category without branching on `category`.
+
+    `speedtests` rows are deliberately kept and their `wan_path_id` set back
+    to NULL. A speedtest measures the internet service, not the box that ran
+    it: replace a gateway and the ISP performance history before the swap is
+    still meaningful. NULL is a state the schema, the attribution code and
+    the UI already handle -- unattributed speedtests stay unattributed.
+
+    `clients.parent_mac`/`parent_name` are deliberately NOT cleared. They are
+    denormalised labels recording where a client *was* attached, and a client
+    that sat on a since-removed AP genuinely did sit on it.
+    """
+    path_ids = [r[0] for r in db.execute(
+        "SELECT id FROM wan_paths WHERE gateway_mac = ?", (mac,)
+    ).fetchall()]
+
+    if path_ids:
+        marks = ",".join("?" * len(path_ids))
+        db.execute(
+            f"UPDATE speedtests SET wan_path_id = NULL WHERE wan_path_id IN ({marks})",
+            path_ids,
+        )
+        db.execute(f"DELETE FROM wan_stats WHERE wan_path_id IN ({marks})", path_ids)
+        db.execute(f"DELETE FROM rtt_path_monitors WHERE wan_path_id IN ({marks})", path_ids)
+        # rtt_monitors is legacy and no longer written, but old rows carry a
+        # wan_path_id and would otherwise outlive their gateway.
+        db.execute(f"DELETE FROM rtt_monitors WHERE wan_path_id IN ({marks})", path_ids)
+
+    db.execute("DELETE FROM wan_paths WHERE gateway_mac = ?", (mac,))
+    db.execute("DELETE FROM speedtest_observations WHERE gateway_mac = ?", (mac,))
+    db.execute("DELETE FROM gateway_stats WHERE gateway_mac = ?", (mac,))
+    db.execute("DELETE FROM device_stats WHERE mac = ?", (mac,))
+    db.execute("DELETE FROM port_stats WHERE mac = ?", (mac,))
+    db.execute("DELETE FROM ap_radios WHERE ap_mac = ?", (mac,))
+    # ap_mac here is *our* AP that observed the neighbour, so these rows are
+    # this device's observations and go with it.
+    db.execute("DELETE FROM rogue_aps WHERE ap_mac = ?", (mac,))
+    db.execute("DELETE FROM rogue_aps_history WHERE ap_mac = ?", (mac,))
+    db.execute("DELETE FROM devices WHERE mac = ?", (mac,))
+
+
 def prune_old(db: sqlite3.Connection, retention_days: int = RETENTION_DAYS) -> None:
     cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
     db.execute("DELETE FROM gateway_stats WHERE ts < ?", (cutoff,))
@@ -408,10 +464,12 @@ def prune_old(db: sqlite3.Connection, retention_days: int = RETENTION_DAYS) -> N
     db.execute("DELETE FROM rtt_monitors WHERE ts < ?", (cutoff,))
     db.execute("DELETE FROM rtt_path_monitors WHERE ts < ?", (cutoff,))
     db.execute("DELETE FROM speedtests WHERE ts < ?", (cutoff,))
-    # wan_paths is deliberately NOT pruned here -- it is identity, not a time
-    # series, and wan_stats rows above are keyed on wan_paths.id. Pruning
-    # wan_paths would orphan wan_stats history and break the whole point of
-    # this design: continuity of a WAN Path's history across restarts.
+    # wan_paths is deliberately NOT pruned by age here (see `delete_device`
+    # for the one case that does remove a path row) -- it is identity, not a
+    # time series, and wan_stats rows above are keyed on wan_paths.id.
+    # Pruning wan_paths would orphan wan_stats history and break the whole
+    # point of this design: continuity of a WAN Path's history across
+    # restarts.
     db.execute("DELETE FROM wan_stats WHERE ts < ?", (cutoff,))
     db.execute("DELETE FROM speedtest_observations WHERE observed_at < ?", (cutoff,))
     db.execute("DELETE FROM vlan_client_history WHERE ts < ?", (cutoff,))
