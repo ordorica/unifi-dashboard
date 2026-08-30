@@ -39,6 +39,7 @@ async def poll() -> tuple[int, int]:
     persist.persist_devices_and_gateways(conn, fast["devices"], ts)
     st_count = persist.persist_speedtests(conn, speedtests)
     rogue_count = persist.persist_rogue_aps(conn, rogue, ts)
+    removed = db.sweep_absent_devices(conn, len(fast["devices"]))
     db.prune_old(conn)
 
     conn.commit()
@@ -47,6 +48,9 @@ async def poll() -> tuple[int, int]:
         "Poll complete: %d online, %d offline, %d new speedtests, %d neighbor readings",
         online_count, offline_count, st_count, rogue_count,
     )
+    if removed:
+        log.info("Removed %d device(s) absent for %d+ days: %s",
+                 len(removed), db.DEVICE_ABSENCE_DAYS, ", ".join(removed))
     return online_count, offline_count
 
 

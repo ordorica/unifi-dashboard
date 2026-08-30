@@ -377,8 +377,16 @@ async def persist_loop():
             persist.persist_vlan_history(conn, ts)
             persist.persist_devices_and_gateways(conn, fast["devices"], ts)
             wan_rows = persist.persist_wan_stats(conn, fast["devices"], ts)
+            # After the upsert, so devices seen this cycle carry a fresh
+            # updated_at and cannot be mistaken for absent. The count is the
+            # guard: a zero-device poll is a controller problem, not eighteen
+            # simultaneous removals.
+            removed = db.sweep_absent_devices(conn, len(fast["devices"]))
             db.prune_old(conn)
             conn.commit()
+            if removed:
+                log.info("Removed %d device(s) absent for %d+ days: %s",
+                         len(removed), db.DEVICE_ABSENCE_DAYS, ", ".join(removed))
 
             offline_rows = conn.execute(
                 "SELECT mac, hostname, last_ip, network, connection_type, last_seen, vendor, parent_mac, parent_name "
