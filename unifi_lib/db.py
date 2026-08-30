@@ -396,7 +396,7 @@ def init_db(db: sqlite3.Connection) -> None:
 
     # Migration: scope observations to the gateway that produced them.
     # Multi-gateway networks can have two gateways report the same ifname
-    # (e.g. both a eth9), and wan_paths is deliberately never pruned, so a
+    # (e.g. both a eth9), and wan_paths is deliberately never pruned by age, so a
     # replaced gateway's rows persist alongside its replacement's -- without
     # this, attribution's join on ifname alone can match the wrong gateway's
     # WAN Path. Not part of the primary key: widening the PK would require

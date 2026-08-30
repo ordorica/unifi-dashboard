@@ -247,3 +247,28 @@ Note the existing ~654k rows were written at the old 60s rate and will age out o
 30-day window on their own. Container logs are capped by the compose json-file driver
 at 3 × 10MB, so the aiohttp access logging that previously grew `live_server.log`
 without limit is now bounded.
+
+### Devices that leave the controller
+
+`devices` rows used to be immortal — the upsert in `persist.py` is the only
+writer and nothing deleted. `sweep_absent_devices()` now marks a device
+`absent` once the controller has not reported it for `DEVICE_ABSENT_AFTER_MINUTES`
+(10) and deletes it, with every row keyed to its MAC, after
+`DEVICE_ABSENCE_DAYS` (7).
+
+A powered-off device is **not** absent: it still appears in `get_devices()`
+with `state != 1`, so its `updated_at` keeps being refreshed. Only a device
+forgotten in the controller stops being refreshed. The sweep refuses to act
+on a zero-device poll, so an authentication failure cannot cascade into data
+loss.
+
+`delete_device()` keeps `speedtests` rows and nulls their `wan_path_id` — a
+speedtest measures the internet service, not the box. It is also the one
+thing that removes a `wan_paths` row: that table is never pruned *by age*,
+but a path whose Gateway Device no longer exists goes with it.
+
+Absent devices are merged into the tick from `state.absent_devices`, because
+`tick["devices"]` is otherwise built purely from the live controller fetch and
+a forgotten device would vanish from the UI instantly. They can be deleted
+early via `DELETE /api/devices/{mac}`, which refuses any device that is not
+`absent` — the only write route in the application.

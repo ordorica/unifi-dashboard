@@ -83,6 +83,8 @@ class State:
         # is removed -- never rendering as absent, and never offering its own
         # delete button. This cache merges those rows back in without a DB
         # read on every 1s tick, the same trade-off as wan_path_ids above.
+        # Likewise empty until the first persist cycle completes, so absent
+        # devices do not render for up to 60s after a restart.
         self.absent_devices: list[dict] = []
 
 
