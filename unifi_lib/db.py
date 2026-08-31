@@ -88,6 +88,18 @@ def init_db(db: sqlite3.Connection) -> None:
     if "parent_name" not in existing_device_cols:
         db.execute("ALTER TABLE devices ADD COLUMN parent_name TEXT")
 
+    # Migration: when this dashboard first *observed* the device to be
+    # missing, as opposed to when the row was last written. The removal clock
+    # has to run on observed absence: `updated_at` alone only says the record
+    # is stale, which is equally true of a device the sweep never got to look
+    # at. If the NAS were down for eight days, the first poll back would find
+    # every not-yet-returned device already past the deletion threshold and
+    # destroy it with no countdown ever having been visible. Written only by
+    # sweep_absent_devices -- set when a device is first marked absent, and
+    # cleared when it comes back -- so the normal upsert stays unaware of it.
+    if "first_absent_at" not in existing_device_cols:
+        db.execute("ALTER TABLE devices ADD COLUMN first_absent_at TEXT")
+
     # gateway_stats: one row per (poll, gateway). gateway_kind distinguishes
     # the primary wired WAN (UDMPRO) from the cellular failover (U5G/T-Mobile).
     db.execute(
@@ -476,11 +488,19 @@ def delete_device(db: sqlite3.Connection, mac: str) -> None:
 
 def sweep_absent_devices(db: sqlite3.Connection, seen_device_count: int) -> list[str]:
     """Mark devices the controller has stopped reporting, then delete the
-    ones it stopped reporting a week ago. Returns the MACs deleted.
+    ones this dashboard has been watching stay absent for a week. Returns the
+    MACs deleted.
 
     Must run *after* persist_devices_and_gateways within the same
     transaction, so every device present in this cycle already carries a
     fresh `updated_at` and cannot be caught by either threshold.
+
+    The deletion clock is `first_absent_at`, not `updated_at`: it measures
+    absence this process actually observed, rather than mere record
+    staleness. Those differ exactly when the sweep was not running -- a NAS
+    or container down for eight days would otherwise come back to find every
+    device already past the deletion threshold and remove it on the first
+    poll, with no countdown ever shown.
 
     Absence is stored rather than computed from the live device list because
     `state.last_fast` is None immediately after a restart -- a set-difference
@@ -500,16 +520,46 @@ def sweep_absent_devices(db: sqlite3.Connection, seen_device_count: int) -> list
         return []
 
     now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
     absent_cutoff = (now - timedelta(minutes=DEVICE_ABSENT_AFTER_MINUTES)).isoformat()
     delete_cutoff = (now - timedelta(days=DEVICE_ABSENCE_DAYS)).isoformat()
 
+    # The three statements below must run in this order.
+    #
+    # 1. Reset the clock for anything that came back. The upsert has already
+    #    overwritten 'absent' with 'online'/'offline' for every device seen
+    #    this cycle, and that self-healing must not need to know this column
+    #    exists -- so the reset is inferred from status here instead. A device
+    #    that returns and later disappears again therefore gets a fresh seven
+    #    days rather than resuming an old countdown.
     db.execute(
-        "UPDATE devices SET status = 'absent' WHERE updated_at < ? AND status != 'absent'",
-        (absent_cutoff,),
+        "UPDATE devices SET first_absent_at = NULL "
+        "WHERE status != 'absent' AND first_absent_at IS NOT NULL"
     )
 
+    # 2. Mark what is missing, starting the clock only if it is not already
+    #    running: COALESCE keeps the *first* observation of absence, so
+    #    repeated sweeps cannot push the deletion date forward forever. The
+    #    `first_absent_at IS NULL` half of the WHERE is what adopts a device
+    #    that was already 'absent' before this column existed -- without it
+    #    such a row would keep a NULL clock and could never be deleted.
+    db.execute(
+        "UPDATE devices SET status = 'absent', first_absent_at = COALESCE(first_absent_at, ?) "
+        "WHERE updated_at < ? AND (status != 'absent' OR first_absent_at IS NULL)",
+        (now_iso, absent_cutoff),
+    )
+
+    # 3. Delete only devices whose absence this dashboard has actually been
+    #    watching for a week. Because step 2 just stamped every newly-absent
+    #    device with `now`, none of them can satisfy this cutoff in the same
+    #    call: a device is always marked in one sweep and deleted in a later
+    #    one, so the countdown is visible in the UI for the whole period.
+    #    `updated_at` is deliberately not consulted -- step 1 guarantees a
+    #    non-NULL first_absent_at means "continuously absent since then".
     doomed = [r[0] for r in db.execute(
-        "SELECT mac FROM devices WHERE updated_at < ?", (delete_cutoff,)
+        "SELECT mac FROM devices "
+        "WHERE status = 'absent' AND first_absent_at IS NOT NULL AND first_absent_at < ?",
+        (delete_cutoff,),
     ).fetchall()]
     for mac in doomed:
         delete_device(db, mac)
