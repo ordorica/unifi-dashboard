@@ -200,7 +200,19 @@ def wan_monitors(stats: dict) -> list[dict]:
     return out
 
 
-def persist_devices_and_gateways(db: sqlite3.Connection, devices: list[dict], ts: str) -> None:
+def persist_devices_and_gateways(db: sqlite3.Connection, devices: list[dict], ts: str) -> int:
+    """Upsert one `devices` row per entry that has a MAC. Returns how many.
+
+    The count is what `sweep_absent_devices` guards on, so it must mean "rows
+    whose updated_at was just refreshed", not "entries the fetch handed us".
+    The two differ: entries without a MAC are skipped below, and `raw_of()`
+    yields {} for any object whose `.raw` is not a dict -- so a dependency
+    change could hand this function N entries that upsert to zero rows. A
+    guard counting entries would see N, proceed, and delete every device a
+    week later; counting upserts makes exactly the "an API change" case its
+    own comment claims to defend against actually detectable.
+    """
+    written = 0
     for raw in devices:
         mac = raw.get("mac")
         if not mac:
@@ -219,6 +231,7 @@ def persist_devices_and_gateways(db: sqlite3.Connection, devices: list[dict], ts
             (mac, raw.get("name"), raw.get("model"), category, device_status(raw),
              raw.get("uptime"), raw.get("ip"), parent_name, ts),
         )
+        written += 1
 
         if category == "gateway":
             _persist_primary_gateway(db, raw, mac, ts)
@@ -246,6 +259,8 @@ def persist_devices_and_gateways(db: sqlite3.Connection, devices: list[dict], ts
             # for both categories is safe and is what makes a umr-only
             # network's RTT show up at all.
             _persist_rtt_monitors(db, raw, ts)
+
+    return written
 
 
 def persist_wan_stats(db: sqlite3.Connection, devices: list[dict], ts: str) -> int:

@@ -391,13 +391,16 @@ async def persist_loop():
             conn = db.connect()
             persist.persist_clients(conn, fast["online"], historical, ts)
             persist.persist_vlan_history(conn, ts)
-            persist.persist_devices_and_gateways(conn, fast["devices"], ts)
+            device_rows = persist.persist_devices_and_gateways(conn, fast["devices"], ts)
             wan_rows = persist.persist_wan_stats(conn, fast["devices"], ts)
             # After the upsert, so devices seen this cycle carry a fresh
-            # updated_at and cannot be mistaken for absent. The count is the
-            # guard: a zero-device poll is a controller problem, not eighteen
+            # updated_at and cannot be mistaken for absent. The guard is the
+            # number of `devices` rows the upsert actually refreshed -- not
+            # the number of entries fetched, which would still look healthy
+            # if a dependency change turned every entry into an empty dict.
+            # Zero rows written is a controller or API problem, not twenty
             # simultaneous removals.
-            removed = db.sweep_absent_devices(conn, len(fast["devices"]))
+            removed = db.sweep_absent_devices(conn, device_rows)
             db.prune_old(conn)
             conn.commit()
             if removed:

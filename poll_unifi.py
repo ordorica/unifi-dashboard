@@ -36,10 +36,14 @@ async def poll() -> tuple[int, int]:
 
     online_count, offline_count = persist.persist_clients(conn, fast["online"], historical, ts)
     persist.persist_vlan_history(conn, ts)
-    persist.persist_devices_and_gateways(conn, fast["devices"], ts)
+    device_rows = persist.persist_devices_and_gateways(conn, fast["devices"], ts)
     st_count = persist.persist_speedtests(conn, speedtests)
     rogue_count = persist.persist_rogue_aps(conn, rogue, ts)
-    removed = db.sweep_absent_devices(conn, len(fast["devices"]))
+    # The guard is the number of `devices` rows the upsert actually
+    # refreshed, not the number of entries fetched -- N entries that all
+    # upsert to zero rows (an API change reshaping the payload) must read as
+    # zero here, or the sweep would delete every device a week later.
+    removed = db.sweep_absent_devices(conn, device_rows)
     db.prune_old(conn)
 
     conn.commit()
