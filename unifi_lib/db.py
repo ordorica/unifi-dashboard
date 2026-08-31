@@ -284,6 +284,19 @@ def init_db(db: sqlite3.Connection) -> None:
     if "wan_path_id" not in existing_st_cols:
         db.execute("ALTER TABLE speedtests ADD COLUMN wan_path_id INTEGER")
 
+    # Migration: distinguish the two meanings of `wan_path_id IS NULL`.
+    # "Not yet attributed" is healable -- _heal_unattributed_speedtests
+    # re-runs the observation join on every persist_speedtests call to catch
+    # rows archived before their WAN Path existed. "Deliberately detached" is
+    # not: delete_device NULLs the link when a gateway is removed, keeping the
+    # ISP history while cutting it loose from a path that no longer exists.
+    # Without this marker the two are indistinguishable, and the healer would
+    # re-credit a dead gateway's speedtests to whichever surviving gateway
+    # happens to have an observation with identical throughput -- silently and
+    # irreversibly. Set to 1 by delete_device; NULL means "never detached".
+    if "wan_path_detached" not in existing_st_cols:
+        db.execute("ALTER TABLE speedtests ADD COLUMN wan_path_detached INTEGER")
+
     # rogue_aps: deduped per (bssid, ap_mac) -- ap_mac is the OUR AP that
     # observed this neighbor, so multiple rows per bssid = multiple of our
     # APs can see the same neighbor, each with its own signal reading.
@@ -432,8 +445,14 @@ def delete_device(db: sqlite3.Connection, mac: str) -> None:
 
     if path_ids:
         marks = ",".join("?" * len(path_ids))
+        # wan_path_detached marks these rows as deliberately cut loose, so
+        # _heal_unattributed_speedtests leaves them alone. Without it the
+        # healer cannot tell them from rows that were never attributed, and
+        # would re-credit this dead gateway's history to a surviving gateway
+        # whose observation happens to match the same throughput.
         db.execute(
-            f"UPDATE speedtests SET wan_path_id = NULL WHERE wan_path_id IN ({marks})",
+            f"UPDATE speedtests SET wan_path_id = NULL, wan_path_detached = 1 "
+            f"WHERE wan_path_id IN ({marks})",
             path_ids,
         )
         db.execute(f"DELETE FROM wan_stats WHERE wan_path_id IN ({marks})", path_ids)

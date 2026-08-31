@@ -494,6 +494,13 @@ def _heal_unattributed_speedtests(db: sqlite3.Connection) -> None:
     once nothing is NULL. Same exactly-one-match rule as
     _match_speedtest_path -- a row that still joins ambiguously, or not at
     all, is left NULL rather than guessed.
+
+    Rows carrying `wan_path_detached = 1` are excluded. Those were NULLed on
+    purpose by `delete_device` when their gateway was removed, and healing
+    them would re-credit a dead gateway's ISP history to whichever surviving
+    gateway happens to have an observation with the same throughput. NULL
+    means two different things here -- "not yet attributed" and "deliberately
+    detached" -- and the marker column is what tells them apart.
     """
     db.execute(
         """
@@ -505,6 +512,7 @@ def _heal_unattributed_speedtests(db: sqlite3.Connection) -> None:
               AND o.xput_upload = speedtests.upload_mbps
         )
         WHERE wan_path_id IS NULL
+          AND wan_path_detached IS NULL
           AND (
             SELECT COUNT(*) FROM speedtest_observations o
             JOIN wan_paths p ON p.ifname = o.ifname AND p.gateway_mac = o.gateway_mac
