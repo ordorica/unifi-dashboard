@@ -135,7 +135,16 @@ class UnifiSession:
             # is still safe: sweep_absent_devices refuses to act on a
             # zero-device poll.
             return []
-        devices = [d for d in data if isinstance(d, dict)]
+        # The MAC filter is not redundant: the old path got it for free from
+        # aiounifi's `process_item`, which returns early when
+        # `_obj_id_from_raw` finds no `obj_id_key` ("mac") in the item.
+        # Reading the response directly loses that, and a MAC-less entry
+        # reaches the tick builder in live_server.py as {"mac": None, ...} --
+        # a stray device row in the browser, and a None in `live_macs`.
+        # persist_devices_and_gateways skips such entries already, so the
+        # database was never at risk; filtering here fixes every consumer at
+        # once rather than just the tick.
+        devices = [d for d in data if isinstance(d, dict) and d.get("mac")]
         self.conn._update_cache(cache_key, devices)
         return devices
 
