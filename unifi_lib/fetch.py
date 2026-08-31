@@ -16,6 +16,7 @@ from unifi_core.network.managers.stats_manager import StatsManager
 from unifi_core.network.managers.traffic_flow_manager import TrafficFlowManager
 from unifi_core.network.models.traffic_flows import TrafficFlowQuery
 from aiounifi.models.api import ApiRequest, ApiRequestV2
+from aiounifi.models.device import DeviceListRequest
 
 SETTINGS_FILE = Path(__file__).resolve().parent.parent.parent / ".claude" / "settings.local.json"
 
@@ -94,10 +95,56 @@ class UnifiSession:
         await self.conn.cleanup()
 
     # ---- Fast tier: cheap, safe to call every few seconds ----
+    async def fetch_devices(self) -> list[dict]:
+        """Devices present in the controller's *current* inventory response.
+
+        This deliberately bypasses `DeviceManager.get_devices()`, which cannot
+        answer that question. It returns `controller.devices.values()`, and
+        aiounifi's APIHandler only ever *adds* to that dict: `process_raw()`
+        is `@final` and simply loops `process_item` over the response without
+        clearing `_items`. The one removal path, `remove_item()`, is reachable
+        only from `process_message()` for a key listed in `remove_messages` --
+        which the `Devices` handler does not declare (it declares
+        `process_messages` only, so the base class default `()` applies), and
+        for which no websocket listener is running here in any case.
+
+        The consequence is the reason this method exists: a device forgotten
+        in the controller would keep being returned for the lifetime of the
+        process, keep having its `updated_at` refreshed by the upsert, and so
+        could never be marked absent or removed by `sweep_absent_devices` --
+        while still rendering as "Online" with a frozen uptime. Reading the
+        controller's own response is what makes absence observable at all.
+
+        The cache is not incidental. `fetch_fast()` runs once a second, and
+        `get_devices()` was serving 29 of every 30 of those calls out of
+        unifi_core's cache; issuing a bare request here would multiply the
+        request rate to the controller by thirty. Going through the same
+        cache, under a key of our own so `DeviceManager`'s `Device` objects
+        are left alone, keeps the load exactly as it was. The 30s staleness
+        is far inside the ten-minute absence threshold.
+        """
+        cache_key = f"devices_raw_{self.conn.site}"
+        cached = self.conn.get_cached(cache_key)
+        if cached is not None:
+            return cached
+
+        data = await self.conn.request(DeviceListRequest.create())
+        if not isinstance(data, list):
+            # A malformed response is not evidence of an empty network, so
+            # don't cache it -- retry on the next tick instead. Returning []
+            # is still safe: sweep_absent_devices refuses to act on a
+            # zero-device poll.
+            return []
+        devices = [d for d in data if isinstance(d, dict)]
+        self.conn._update_cache(cache_key, devices)
+        return devices
+
     async def fetch_fast(self) -> dict:
         await self.ensure_connected()
         online = [raw_of(c) for c in await self.clients.get_clients()]
-        devices = [raw_of(d) for d in await self.devices.get_devices()]
+        # Already raw dicts straight off the wire -- the same objects
+        # `raw_of()` used to unwrap out of each `Device`.
+        devices = await self.fetch_devices()
         return {"online": online, "devices": devices}
 
     # ---- Slow tier: heavier calls, poll infrequently ----
