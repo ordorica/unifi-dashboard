@@ -137,6 +137,9 @@
   .chart-svg { width: 100%; height: auto; display: block; overflow: visible; }
   .chart-line { fill: none; stroke-width: 2px; stroke-linecap: round; stroke-linejoin: round; }
   .chart-area { stroke: none; fill-opacity: 0.12; }
+  /* Peak envelope: the MAX within each bucket, drawn behind the average so a
+     burst stays visible once buckets are wider than the 60s sample interval. */
+  .chart-peak { fill: none; stroke-width: 1px; stroke-opacity: 0.38; stroke-linejoin: round; }
 
   .rtt-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px; margin-top: 12px; }
   .rtt-card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px 8px; }
@@ -1066,7 +1069,13 @@ function renderLineChart(wrapEl, { series, xLabels, xValues, yFormat, height = 2
   }
   let paths = "";
   const baseY = padT + plotH; // bottom of the plot -- fills always sit on the axis floor, even when yMin is negative (dBm charts)
-  series.forEach(s => {
+  // Peaks first so the average line draws on top of its own envelope.
+  series.filter(s => s.peak).forEach(s => {
+    const pts = [];
+    s.data.forEach((v, i) => { if (v != null) pts.push(`${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`); });
+    if (pts.length) paths += `<polyline class="chart-peak" points="${pts.join(" ")}" stroke="var(${s.color})"/>`;
+  });
+  series.filter(s => !s.peak).forEach(s => {
     const ptsArr = [];
     s.data.forEach((v, i) => { if (v != null) ptsArr.push([xAt(i), yAt(v)]); });
     if (ptsArr.length > 0) {
@@ -1084,7 +1093,7 @@ function renderLineChart(wrapEl, { series, xLabels, xValues, yFormat, height = 2
     <svg class="chart-svg" id="${svgId}" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">
       ${gridLines}${yLabels}${xLabelsSvg}${paths}
       <line class="chart-crosshair" id="${svgId}-cross" x1="0" y1="${padT}" x2="0" y2="${padT+plotH}" style="opacity:0"/>
-      ${series.map(s => `<circle class="chart-dot" id="${svgId}-dot-${s.key}" r="3.5" fill="var(${s.color})" style="opacity:0; stroke:var(--surface-1); stroke-width:1.5"/>`).join("")}
+      ${series.filter(s => !s.peak).map(s => `<circle class="chart-dot" id="${svgId}-dot-${s.key}" r="3.5" fill="var(${s.color})" style="opacity:0; stroke:var(--surface-1); stroke-width:1.5"/>`).join("")}
       <rect class="hover-overlay" x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="transparent"/>
     </svg>
     <div class="chart-tooltip" id="${svgId}-tooltip"></div>
@@ -1102,8 +1111,11 @@ function renderLineChart(wrapEl, { series, xLabels, xValues, yFormat, height = 2
     const i = indexAtX(svgX);
     const x = xAt(i);
     cross.setAttribute("x1", x); cross.setAttribute("x2", x); cross.style.opacity = 1;
-    series.forEach(s => {
+    // Peak series have no hover dot (they are an envelope, not a reading you
+    // point at), so they are skipped here -- they still appear in the tooltip.
+    series.filter(s => !s.peak).forEach(s => {
       const dot = document.getElementById(svgId + "-dot-" + s.key);
+      if (!dot) return;
       if (s.data[i] == null) { dot.style.opacity = 0; return; }
       dot.setAttribute("cx", x); dot.setAttribute("cy", yAt(s.data[i])); dot.style.opacity = 1;
     });
@@ -1118,7 +1130,10 @@ function renderLineChart(wrapEl, { series, xLabels, xValues, yFormat, height = 2
   overlay.addEventListener("mousemove", e => updateHover(e.clientX));
   overlay.addEventListener("mouseleave", () => {
     cross.style.opacity = 0;
-    series.forEach(s => document.getElementById(svgId + "-dot-" + s.key).style.opacity = 0);
+    series.filter(s => !s.peak).forEach(s => {
+      const dot = document.getElementById(svgId + "-dot-" + s.key);
+      if (dot) dot.style.opacity = 0;
+    });
     tooltip.style.opacity = 0;
   });
 }
@@ -1677,10 +1692,13 @@ async function loadPortDrill(mac, idx) {
 function drawPortDrillChart(portKey, rows) {
   const el = document.getElementById(`port-drill-chart-${safeMacId(portKey)}`);
   if (!el) return;
+  const mbps = v => v != null ? v/1e6 : null;
   renderLineChart(el, {
     series: [
-      { key: "down", name: "Download", color: "--slot-1", data: rows.map(r => r.rxRateBps != null ? r.rxRateBps/1e6 : null) },
-      { key: "up", name: "Upload", color: "--slot-2", data: rows.map(r => r.txRateBps != null ? r.txRateBps/1e6 : null) },
+      { key: "downPeak", name: "Download peak", color: "--slot-1", peak: true, data: rows.map(r => mbps(r.rxPeakBps)) },
+      { key: "upPeak", name: "Upload peak", color: "--slot-2", peak: true, data: rows.map(r => mbps(r.txPeakBps)) },
+      { key: "down", name: "Download", color: "--slot-1", data: rows.map(r => mbps(r.rxRateBps)) },
+      { key: "up", name: "Upload", color: "--slot-2", data: rows.map(r => mbps(r.txRateBps)) },
     ],
     xLabels: rows.map(r => bucketLabel(r.t, deviceDrillRange)),
     xValues: rows.map(r => bucketTime(r.t)),
@@ -1712,10 +1730,16 @@ async function loadDeviceDrill(mac, category) {
 function drawDeviceDrillChart(mac, rows) {
   const el = document.getElementById(`device-drill-chart-${safeMacId(mac)}`);
   if (!el) return;
+  const mbps = v => v != null ? v/1e6 : null;
   renderLineChart(el, {
     series: [
-      { key: "down", name: "Download", color: "--slot-1", data: rows.map(r => r.rxRateBps != null ? r.rxRateBps/1e6 : null) },
-      { key: "up", name: "Upload", color: "--slot-2", data: rows.map(r => r.txRateBps != null ? r.txRateBps/1e6 : null) },
+      // Peaks are the MAX within each bucket. At ranges longer than 24h a
+      // bucket spans many 60s samples, so the average alone would flatten a
+      // burst out of existence; the envelope keeps it visible.
+      { key: "downPeak", name: "Download peak", color: "--slot-1", peak: true, data: rows.map(r => mbps(r.rxPeakBps)) },
+      { key: "upPeak", name: "Upload peak", color: "--slot-2", peak: true, data: rows.map(r => mbps(r.txPeakBps)) },
+      { key: "down", name: "Download", color: "--slot-1", data: rows.map(r => mbps(r.rxRateBps)) },
+      { key: "up", name: "Upload", color: "--slot-2", data: rows.map(r => mbps(r.txRateBps)) },
     ],
     xLabels: rows.map(r => bucketLabel(r.t, deviceDrillRange)),
     xValues: rows.map(r => bucketTime(r.t)),

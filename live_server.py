@@ -512,19 +512,49 @@ async def handle_ws(request):
     return ws
 
 
-def _bucket_query(range_key: str) -> tuple[str, str]:
-    """Returns (cutoff_iso, sqlite strftime bucket format) for a range key.
-    Data is persisted once per PERSIST_INTERVAL (60s), so minute-level
-    buckets are the finest resolution that actually means anything -- no
-    point aggregating to hourly and throwing away real samples."""
+# Bucket width per range, chosen so every range returns roughly 1,500 points.
+# Minute buckets at every range -- what this used to do -- put 43,200 points
+# in a 30-day chart perhaps 800px wide: 54 samples per pixel, and ~2.5s of
+# browser time building a 2MB SVG polyline to draw them. The database was
+# never the problem; it answers in well under 100ms either way.
+_BUCKET_MINUTES = {"24h": 1, "7d": 5, "14d": 15, "30d": 30}
+_RANGE_DELTA = {"24h": timedelta(hours=24), "7d": timedelta(days=7),
+                "14d": timedelta(days=14), "30d": timedelta(days=30)}
+
+
+def _bucket_expr(minutes: int, col: str = "ts") -> str:
+    """SQL expression bucketing an ISO-8601 timestamp column to `minutes`.
+
+    Built from substr rather than strftime because these timestamps are
+    already ISO-8601 text: slicing the string beats parsing it into a date
+    and formatting it back, and measurably so -- a 30-day device query drops
+    from ~72ms to ~39ms even while producing 30x fewer rows.
+
+    This depends on the column being exactly `YYYY-MM-DDTHH:MM...`, which
+    every timestamp in this schema is (they all come from persist.now_iso(),
+    i.e. datetime.isoformat()). A column in another format would silently
+    bucket wrong rather than error, so do not point this at one.
+    """
+    if minutes <= 1:
+        return f"substr({col},1,17) || '00'"
+    return (f"substr({col},1,14) || "
+            f"printf('%02d', (CAST(substr({col},15,2) AS INTEGER) / {minutes}) * {minutes}) || ':00'")
+
+
+def _bucket_query(range_key: str, col: str = "ts") -> tuple[str, str]:
+    """Returns (cutoff_iso, bucket SQL expression) for a range key.
+
+    The bucket is an expression, not a strftime format, because its width now
+    varies with the range -- see _BUCKET_MINUTES. Output format is unchanged
+    (`YYYY-MM-DDTHH:MM:00`), so callers and the frontend need no adjustment.
+
+    Data is persisted once per PERSIST_INTERVAL (60s), so a 1-minute bucket
+    is still one sample; only the longer ranges actually aggregate.
+    """
     now = datetime.now(timezone.utc)
-    if range_key == "24h":
-        return (now - timedelta(hours=24)).isoformat(), "%Y-%m-%dT%H:%M:00"
-    if range_key == "14d":
-        return (now - timedelta(days=14)).isoformat(), "%Y-%m-%dT%H:%M:00"
-    if range_key == "30d":
-        return (now - timedelta(days=30)).isoformat(), "%Y-%m-%dT%H:%M:00"
-    return (now - timedelta(days=7)).isoformat(), "%Y-%m-%dT%H:%M:00"  # default 7d
+    delta = _RANGE_DELTA.get(range_key, timedelta(days=7))
+    minutes = _BUCKET_MINUTES.get(range_key, _BUCKET_MINUTES["7d"])
+    return (now - delta).isoformat(), _bucket_expr(minutes, col)
 
 
 async def handle_wans(request):
@@ -573,14 +603,15 @@ async def handle_wan_history(request):
     wan_id = request.query.get("wan")
     mac = request.query.get("mac")
     range_key = request.query.get("range", "7d")
-    cutoff, bucket_fmt = _bucket_query(range_key)
+    cutoff, bucket_expr = _bucket_query(range_key)
     conn = db.connect()
 
     if wan_id:
         rows = conn.execute(
             f"""
-            SELECT strftime('{bucket_fmt}', ts) AS bucket,
-                   AVG(rx_rate_bps), AVG(tx_rate_bps), AVG(latency_ms)
+            SELECT {bucket_expr} AS bucket,
+                   AVG(rx_rate_bps), AVG(tx_rate_bps), AVG(latency_ms),
+                   MAX(rx_rate_bps), MAX(tx_rate_bps)
             FROM wan_stats
             WHERE wan_path_id = ? AND ts >= ?
             GROUP BY bucket ORDER BY bucket
@@ -589,7 +620,9 @@ async def handle_wan_history(request):
         ).fetchall()
         conn.close()
         return web.json_response([
-            {"t": r[0], "rxRateBps": r[1], "txRateBps": r[2], "latencyMs": r[3]} for r in rows
+            {"t": r[0], "rxRateBps": r[1], "txRateBps": r[2], "latencyMs": r[3],
+             "rxPeakBps": r[4], "txPeakBps": r[5]}
+            for r in rows
         ])
 
     if not mac:
@@ -612,10 +645,13 @@ async def handle_wan_history(request):
         "SELECT COUNT(*) FROM wan_paths WHERE gateway_mac = ? AND last_seen >= ?",
         (mac, active_cutoff),
     ).fetchone()
+    # This branch buckets a subquery column, not a bare `ts`.
+    bucket_sub = _bucket_query(range_key, "per_sample.ts")[1]
     rows = conn.execute(
         f"""
-        SELECT strftime('{bucket_fmt}', per_sample.ts) AS bucket,
-               AVG(per_sample.rx), AVG(per_sample.tx), AVG(per_sample.lat)
+        SELECT {bucket_sub} AS bucket,
+               AVG(per_sample.rx), AVG(per_sample.tx), AVG(per_sample.lat),
+               MAX(per_sample.rx), MAX(per_sample.tx)
         FROM (
             SELECT ws.ts AS ts, SUM(ws.rx_rate_bps) AS rx, SUM(ws.tx_rate_bps) AS tx,
                    AVG(ws.latency_ms) AS lat
@@ -630,7 +666,8 @@ async def handle_wan_history(request):
     conn.close()
     return web.json_response([
         {"t": r[0], "rxRateBps": r[1], "txRateBps": r[2],
-         "latencyMs": r[3] if path_count == 1 else None}
+         "latencyMs": r[3] if path_count == 1 else None,
+         "rxPeakBps": r[4], "txPeakBps": r[5]}
         for r in rows
     ])
 
@@ -639,11 +676,11 @@ async def handle_gateway_history(request):
     """Device-scoped history for one Gateway Device: CPU, memory, load, temps."""
     mac = request.query.get("mac")
     range_key = request.query.get("range", "7d")
-    cutoff, bucket_fmt = _bucket_query(range_key)
+    cutoff, bucket_expr = _bucket_query(range_key)
     conn = db.connect()
     rows = conn.execute(
         f"""
-        SELECT strftime('{bucket_fmt}', ts) AS bucket,
+        SELECT {bucket_expr} AS bucket,
                AVG(cpu_pct), AVG(mem_pct), AVG(load1), AVG(load5), AVG(load15), AVG(temp_cpu)
         FROM gateway_stats
         WHERE gateway_mac = ? AND ts >= ?
@@ -662,11 +699,11 @@ async def handle_ap_history(request):
     mac = request.match_info["mac"]
     band = request.match_info["band"]
     range_key = request.query.get("range", "24h")
-    cutoff, bucket_fmt = _bucket_query(range_key)
+    cutoff, bucket_expr = _bucket_query(range_key)
     conn = db.connect()
     rows = conn.execute(
         f"""
-        SELECT strftime('{bucket_fmt}', ts) AS bucket, AVG(cu_total), AVG(num_sta), AVG(retry_pct)
+        SELECT {bucket_expr} AS bucket, AVG(cu_total), AVG(num_sta), AVG(retry_pct)
         FROM ap_radios WHERE ap_mac = ? AND band = ? AND ts >= ?
         GROUP BY bucket ORDER BY bucket
         """,
@@ -682,18 +719,23 @@ async def handle_device_history(request):
     in gateway_stats, no need for a second copy in device_stats."""
     mac = request.match_info["mac"]
     range_key = request.query.get("range", "24h")
-    cutoff, bucket_fmt = _bucket_query(range_key)
+    cutoff, bucket_expr = _bucket_query(range_key)
     conn = db.connect()
     rows = conn.execute(
         f"""
-        SELECT strftime('{bucket_fmt}', ts) AS bucket, AVG(rx_bps), AVG(tx_bps)
+        SELECT {bucket_expr} AS bucket, AVG(rx_bps), AVG(tx_bps),
+               MAX(rx_bps), MAX(tx_bps)
         FROM device_stats WHERE mac = ? AND ts >= ?
         GROUP BY bucket ORDER BY bucket
         """,
         (mac, cutoff),
     ).fetchall()
     conn.close()
-    return web.json_response([{"t": r[0], "rxRateBps": r[1], "txRateBps": r[2]} for r in rows])
+    return web.json_response([
+        {"t": r[0], "rxRateBps": r[1], "txRateBps": r[2],
+         "rxPeakBps": r[3], "txPeakBps": r[4]}
+        for r in rows
+    ])
 
 
 async def handle_port_history(request):
@@ -703,18 +745,23 @@ async def handle_port_history(request):
     except ValueError:
         return web.json_response([])
     range_key = request.query.get("range", "24h")
-    cutoff, bucket_fmt = _bucket_query(range_key)
+    cutoff, bucket_expr = _bucket_query(range_key)
     conn = db.connect()
     rows = conn.execute(
         f"""
-        SELECT strftime('{bucket_fmt}', ts) AS bucket, AVG(rx_bps), AVG(tx_bps)
+        SELECT {bucket_expr} AS bucket, AVG(rx_bps), AVG(tx_bps),
+               MAX(rx_bps), MAX(tx_bps)
         FROM port_stats WHERE mac = ? AND port_idx = ? AND ts >= ?
         GROUP BY bucket ORDER BY bucket
         """,
         (mac, port_idx, cutoff),
     ).fetchall()
     conn.close()
-    return web.json_response([{"t": r[0], "rxRateBps": r[1], "txRateBps": r[2]} for r in rows])
+    return web.json_response([
+        {"t": r[0], "rxRateBps": r[1], "txRateBps": r[2],
+         "rxPeakBps": r[3], "txPeakBps": r[4]}
+        for r in rows
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -1198,11 +1245,11 @@ async def handle_rtt_history(request):
     if not wan_id:
         return web.json_response([])
     range_key = request.query.get("range", "24h")
-    cutoff, bucket_fmt = _bucket_query(range_key)
+    cutoff, bucket_expr = _bucket_query(range_key)
     conn = db.connect()
     rows = conn.execute(
         f"""
-        SELECT target, monitor_type, strftime('{bucket_fmt}', ts) AS bucket,
+        SELECT target, monitor_type, {bucket_expr} AS bucket,
                AVG(latency_ms), AVG(availability)
         FROM rtt_path_monitors WHERE wan_path_id = ? AND ts >= ?
         GROUP BY target, monitor_type, bucket
@@ -1309,11 +1356,11 @@ async def handle_wan_usage(request):
 async def handle_neighbor_history(request):
     bssid = request.match_info["bssid"]
     range_key = request.query.get("range", "7d")
-    cutoff, bucket_fmt = _bucket_query(range_key)
+    cutoff, bucket_expr = _bucket_query(range_key)
     conn = db.connect()
     rows = conn.execute(
         f"""
-        SELECT strftime('{bucket_fmt}', ts) AS bucket, MAX(signal)
+        SELECT {bucket_expr} AS bucket, MAX(signal)
         FROM rogue_aps_history WHERE bssid = ? AND ts >= ?
         GROUP BY bucket ORDER BY bucket
         """,
@@ -1340,11 +1387,11 @@ async def handle_speedtest_history(request):
 async def handle_vlan_history(request):
     network = request.match_info["network"]
     range_key = request.query.get("range", "7d")
-    cutoff, bucket_fmt = _bucket_query(range_key)
+    cutoff, bucket_expr = _bucket_query(range_key)
     conn = db.connect()
     rows = conn.execute(
         f"""
-        SELECT strftime('{bucket_fmt}', ts) AS bucket, AVG(online_count)
+        SELECT {bucket_expr} AS bucket, AVG(online_count)
         FROM vlan_client_history WHERE network = ? AND ts >= ?
         GROUP BY bucket ORDER BY bucket
         """,
