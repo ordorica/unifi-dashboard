@@ -20,6 +20,14 @@ RETENTION_DAYS = 30
 DEVICE_ABSENT_AFTER_MINUTES = 10
 DEVICE_ABSENCE_DAYS = 7
 
+# Rows per DELETE statement when removing a device's history. One statement
+# covering every row holds SQLite's write lock for its whole duration; on a
+# month of data that is hundreds of thousands of rows and several seconds,
+# during which every other writer blocks. Chunking keeps each lock hold to
+# milliseconds. 5000 is large enough that per-statement overhead stays
+# negligible and small enough that no chunk runs long.
+DELETE_CHUNK_ROWS = 5000
+
 
 def connect() -> sqlite3.Connection:
     db = sqlite3.connect(DB_FILE, timeout=10)
@@ -155,6 +163,12 @@ def init_db(db: sqlite3.Connection) -> None:
         """
     )
     db.execute("CREATE INDEX IF NOT EXISTS idx_ap_radios_ts ON ap_radios(ts)")
+    # ap_mac is not the leftmost column of this table's primary key
+    # (ts, ap_mac, band), so nothing served `WHERE ap_mac = ?` before this.
+    # delete_device needs it: its chunked delete re-runs that WHERE once per
+    # chunk, so an unindexed column costs one full scan per chunk rather
+    # than one overall.
+    db.execute("CREATE INDEX IF NOT EXISTS idx_ap_radios_mac ON ap_radios(ap_mac)")
 
     # device_stats: uplink-port bandwidth history for non-gateway devices
     # (switch/AP/other). Gateways already have this in gateway_stats
@@ -330,6 +344,9 @@ def init_db(db: sqlite3.Connection) -> None:
         """
     )
     db.execute("CREATE INDEX IF NOT EXISTS idx_rogue_aps_updated ON rogue_aps(updated_at)")
+    # Same reason as idx_ap_radios_mac: ap_mac is not a usable prefix of this
+    # table's key, and delete_device filters on it per chunk.
+    db.execute("CREATE INDEX IF NOT EXISTS idx_rogue_aps_ap_mac ON rogue_aps(ap_mac)")
 
     # rogue_aps_history: append-only time series (one row per sighting per
     # poll) so neighbor signal/presence can be viewed over time, up to
@@ -351,6 +368,9 @@ def init_db(db: sqlite3.Connection) -> None:
         """
     )
     db.execute("CREATE INDEX IF NOT EXISTS idx_rogue_history_bssid_ts ON rogue_aps_history(bssid, ts)")
+    # Same reason as idx_ap_radios_mac: ap_mac is not a usable prefix of this
+    # table's key, and delete_device filters on it per chunk.
+    db.execute("CREATE INDEX IF NOT EXISTS idx_rogue_history_ap_mac ON rogue_aps_history(ap_mac)")
 
     db.execute(
         """
@@ -434,6 +454,36 @@ def init_db(db: sqlite3.Connection) -> None:
     db.commit()
 
 
+def _delete_in_chunks(db: sqlite3.Connection, table: str, column: str, value,
+                      chunk_size: int = DELETE_CHUNK_ROWS) -> int:
+    """Delete matching rows a chunk at a time, committing between chunks.
+
+    A single DELETE covering a month of one device's history is hundreds of
+    thousands of rows, and SQLite holds the write lock for the whole
+    statement. Every other writer blocks on that lock, and since this
+    project's writers are synchronous calls on the aiohttp event loop, the
+    block propagates to the entire dashboard -- WebSocket ticks included.
+    Committing per chunk keeps each lock hold to milliseconds.
+
+    `column` MUST be indexed. The WHERE is re-evaluated for every chunk, so
+    an unindexed column turns one full table scan into one scan per chunk.
+
+    Table and column names are interpolated, never values: both are internal
+    literals from delete_device below, never anything a request supplies.
+    """
+    removed = 0
+    while True:
+        cur = db.execute(
+            f"DELETE FROM {table} WHERE rowid IN "
+            f"(SELECT rowid FROM {table} WHERE {column} = ? LIMIT {int(chunk_size)})",
+            (value,),
+        )
+        db.commit()
+        removed += cur.rowcount
+        if cur.rowcount < chunk_size:
+            return removed
+
+
 def delete_device(db: sqlite3.Connection, mac: str) -> None:
     """Remove one device and every row keyed to it.
 
@@ -441,11 +491,25 @@ def delete_device(db: sqlite3.Connection, mac: str) -> None:
     switch or an AP -- they own no paths and write no gateway_stats -- so one
     code path serves every category without branching on `category`.
 
+    **This function commits, repeatedly.** The history tables are deleted in
+    committed chunks (see _delete_in_chunks) so no single statement holds
+    SQLite's write lock long enough to stall the rest of the application.
+    The cost is atomicity: an interrupted delete leaves the device partly
+    removed. That is recoverable and the ordering is chosen to make it so --
+    the `devices` row goes last, so an interrupted run leaves the device
+    still present and still absent, and the next sweep simply deletes it
+    again. The reverse order would orphan history under a MAC nothing
+    refers to.
+
+    Callers on the event loop must not call this directly -- use
+    delete_device_if_absent in a worker thread.
+
     `speedtests` rows are deliberately kept and their `wan_path_id` set back
     to NULL. A speedtest measures the internet service, not the box that ran
     it: replace a gateway and the ISP performance history before the swap is
-    still meaningful. NULL is a state the schema, the attribution code and
-    the UI already handle -- unattributed speedtests stay unattributed.
+    still meaningful. `wan_path_detached` marks them so
+    _heal_unattributed_speedtests cannot re-credit them to a surviving
+    gateway.
 
     `clients.parent_mac`/`parent_name` are deliberately NOT cleared. They are
     denormalised labels recording where a client *was* attached, and a client
@@ -457,39 +521,92 @@ def delete_device(db: sqlite3.Connection, mac: str) -> None:
 
     if path_ids:
         marks = ",".join("?" * len(path_ids))
-        # wan_path_detached marks these rows as deliberately cut loose, so
-        # _heal_unattributed_speedtests leaves them alone. Without it the
-        # healer cannot tell them from rows that were never attributed, and
-        # would re-credit this dead gateway's history to a surviving gateway
-        # whose observation happens to match the same throughput.
+        # Small and bounded -- one row per speedtest, not per sample -- so
+        # this stays a single statement.
         db.execute(
             f"UPDATE speedtests SET wan_path_id = NULL, wan_path_detached = 1 "
             f"WHERE wan_path_id IN ({marks})",
             path_ids,
         )
-        db.execute(f"DELETE FROM wan_stats WHERE wan_path_id IN ({marks})", path_ids)
-        db.execute(f"DELETE FROM rtt_path_monitors WHERE wan_path_id IN ({marks})", path_ids)
-        # rtt_monitors is legacy and no longer written, but old rows carry a
-        # wan_path_id and would otherwise outlive their gateway.
-        db.execute(f"DELETE FROM rtt_monitors WHERE wan_path_id IN ({marks})", path_ids)
+        db.commit()
+        for pid in path_ids:
+            # Per-sample tables: chunked. rtt_monitors is legacy and no
+            # longer written, but old rows carry a wan_path_id and would
+            # otherwise outlive their gateway.
+            _delete_in_chunks(db, "wan_stats", "wan_path_id", pid)
+            _delete_in_chunks(db, "rtt_path_monitors", "wan_path_id", pid)
+            _delete_in_chunks(db, "rtt_monitors", "wan_path_id", pid)
 
+    # Per-sample history: one row per device per poll, so a month of data is
+    # large enough to need chunking.
+    _delete_in_chunks(db, "gateway_stats", "gateway_mac", mac)
+    _delete_in_chunks(db, "device_stats", "mac", mac)
+    _delete_in_chunks(db, "port_stats", "mac", mac)
+    _delete_in_chunks(db, "ap_radios", "ap_mac", mac)
+    # ap_mac here is *our* AP that observed the neighbour, so these rows are
+    # this device's observations and go with it. This is the largest table of
+    # the lot -- one row per neighbour per scan.
+    _delete_in_chunks(db, "rogue_aps_history", "ap_mac", mac)
+
+    # Bounded tables: one row per path, per neighbour, or one row total.
+    db.execute("DELETE FROM rogue_aps WHERE ap_mac = ?", (mac,))
     db.execute("DELETE FROM wan_paths WHERE gateway_mac = ?", (mac,))
     db.execute("DELETE FROM speedtest_observations WHERE gateway_mac = ?", (mac,))
-    db.execute("DELETE FROM gateway_stats WHERE gateway_mac = ?", (mac,))
-    db.execute("DELETE FROM device_stats WHERE mac = ?", (mac,))
-    db.execute("DELETE FROM port_stats WHERE mac = ?", (mac,))
-    db.execute("DELETE FROM ap_radios WHERE ap_mac = ?", (mac,))
-    # ap_mac here is *our* AP that observed the neighbour, so these rows are
-    # this device's observations and go with it.
-    db.execute("DELETE FROM rogue_aps WHERE ap_mac = ?", (mac,))
-    db.execute("DELETE FROM rogue_aps_history WHERE ap_mac = ?", (mac,))
+    # Last, deliberately: see the atomicity note above.
     db.execute("DELETE FROM devices WHERE mac = ?", (mac,))
+    db.commit()
 
 
-def sweep_absent_devices(db: sqlite3.Connection, seen_device_count: int) -> list[str]:
+def delete_device_if_absent(mac: str) -> str | None:
+    """Re-check the `absent` precondition and delete, on a connection of its own.
+
+    Returns None when the device was deleted, "missing" when there is no such
+    row, or the device's current status when it is not absent.
+
+    The check lives in here, beside the delete, rather than in the caller.
+    A caller on the event loop must `await` to reach a worker thread, and
+    that await is a yield: between an outside check and this call,
+    persist_loop can run and upsert a returning device back to 'online'. The
+    precondition would then be stale and a live device's history would go.
+    Re-checking on this thread, on this connection, with no await between
+    check and delete, closes that window.
+
+    sqlite3 connections are not safe to share across threads, so the thread
+    doing the work opens and closes its own.
+
+    One consequence of delete_device committing per chunk: a device that
+    comes back *during* the cascade may be re-inserted by persist_loop while
+    its history is still being removed. It is then deleted again by the final
+    statement and re-added by the next poll, so the table self-corrects; the
+    already-deleted history does not come back. This needs the device to
+    return within the few seconds a delete takes, and the alternative -- one
+    long transaction -- is the freeze this design exists to avoid.
+    """
+    conn = connect()
+    try:
+        row = conn.execute("SELECT status FROM devices WHERE mac = ?", (mac,)).fetchone()
+        if row is None:
+            return "missing"
+        if row[0] != "absent":
+            return row[0]
+        delete_device(conn, mac)
+        return None
+    finally:
+        conn.close()
+
+
+def sweep_absent_devices(db: sqlite3.Connection, seen_device_count: int,
+                         delete: bool = True) -> list[str]:
     """Mark devices the controller has stopped reporting, then delete the
     ones this dashboard has been watching stay absent for a week. Returns the
-    MACs deleted.
+    MACs that are due for deletion.
+
+    With `delete=False` it marks and returns the due MACs without removing
+    anything, leaving the caller to do it. Callers on the aiohttp event loop
+    must use that form: the cascade takes seconds on a month of data, and
+    running it here would block the loop -- and therefore every WebSocket
+    tick and every other request -- for its whole duration. `poll_unifi.py`
+    is a standalone process with no event loop, so it uses the default.
 
     Must run *after* persist_devices_and_gateways within the same
     transaction, so every device present in this cycle already carries a
@@ -561,8 +678,9 @@ def sweep_absent_devices(db: sqlite3.Connection, seen_device_count: int) -> list
         "WHERE status = 'absent' AND first_absent_at IS NOT NULL AND first_absent_at < ?",
         (delete_cutoff,),
     ).fetchall()]
-    for mac in doomed:
-        delete_device(db, mac)
+    if delete:
+        for mac in doomed:
+            delete_device(db, mac)
     return doomed
 
 

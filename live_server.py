@@ -400,9 +400,22 @@ async def persist_loop():
             # if a dependency change turned every entry into an empty dict.
             # Zero rows written is a controller or API problem, not twenty
             # simultaneous removals.
-            removed = db.sweep_absent_devices(conn, device_rows)
+            # delete=False: this marks and reports what is due, but does
+            # not remove it. The cascade over a month of history takes
+            # seconds, and every database call in this file is synchronous,
+            # so running it here would block the event loop -- and with it
+            # every WebSocket tick and every other request -- for that whole
+            # time. The removals happen off-thread below, after the commit.
+            due = db.sweep_absent_devices(conn, device_rows, delete=False)
             db.prune_old(conn)
             conn.commit()
+            # delete_device_if_absent, not a bare delete: `due` was read
+            # before this await, and a device that comes back in between is
+            # no longer absent and must be spared.
+            removed = []
+            for mac in due:
+                if await asyncio.to_thread(db.delete_device_if_absent, mac) is None:
+                    removed.append(mac)
             if removed:
                 log.info("Removed %d device(s) absent for %d+ days: %s",
                          len(removed), db.DEVICE_ABSENCE_DAYS, ", ".join(removed))
@@ -1455,18 +1468,20 @@ async def handle_device_delete(request):
     reached through it at all.
     """
     mac = request.match_info["mac"]
-    conn = db.connect()
-    try:
-        row = conn.execute("SELECT status FROM devices WHERE mac = ?", (mac,)).fetchone()
-        if row is None:
-            return web.json_response({"error": "unknown device"}, status=404)
-        if row[0] != "absent":
-            return web.json_response(
-                {"error": "device is not absent", "status": row[0]}, status=409)
-        db.delete_device(conn, mac)
-        conn.commit()
-    finally:
-        conn.close()
+
+    # Checked and deleted together on a worker thread. The cascade over a
+    # month of history is hundreds of thousands of rows and takes seconds;
+    # sqlite3 calls are synchronous, so doing it on the loop would freeze
+    # the dashboard for every connected browser until it finished. The
+    # precondition goes with it rather than staying here, because awaiting
+    # to reach the thread is a yield -- persist_loop could bring the device
+    # back to 'online' in between and leave a check made here stale.
+    blocked = await asyncio.to_thread(db.delete_device_if_absent, mac)
+    if blocked == "missing":
+        return web.json_response({"error": "unknown device"}, status=404)
+    if blocked is not None:
+        return web.json_response(
+            {"error": "device is not absent", "status": blocked}, status=409)
 
     # Drop it from the tick cache too, or it reappears for up to 60s until
     # the next persist cycle rebuilds the list.
